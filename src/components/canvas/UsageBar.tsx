@@ -1,7 +1,7 @@
 'use client'
 
-import { Box, Typography, LinearProgress, IconButton } from '@mui/material'
-import { Refresh } from '@mui/icons-material'
+import { Box, Typography, LinearProgress, IconButton, Tooltip } from '@mui/material'
+import { Refresh, Info } from '@mui/icons-material'
 import { UsageStatus } from '@/lib/usageTracker'
 import { useState, useEffect } from 'react'
 
@@ -12,13 +12,11 @@ interface UsageBarProps {
 }
 
 export default function UsageBar({ usageStatus, onUsageClick, onReset }: UsageBarProps) {
-  const { color, usedToday, dailyCap, remainingQuota, daysLeft, cooldownUntil } = usageStatus
+  const { color, cooldownUntil, windowUsages, bottleneckWindow, remainingInBottleneck, overdraft, tierName } = usageStatus
   const [availableTime, setAvailableTime] = useState<string>('')
 
   // Cooldown timer effect - show when it will be available
   useEffect(() => {
-    console.log('UsageBar - cooldownUntil:', cooldownUntil, 'color:', color, 'availableTime:', availableTime)
-    
     if (!cooldownUntil) {
       setAvailableTime('')
       return
@@ -27,8 +25,6 @@ export default function UsageBar({ usageStatus, onUsageClick, onReset }: UsageBa
     const updateTimer = () => {
       const now = Math.floor(Date.now() / 1000)
       const timeRemaining = cooldownUntil - now
-
-      console.log('Timer update - now:', now, 'cooldownUntil:', cooldownUntil, 'timeRemaining:', timeRemaining)
 
       if (timeRemaining <= 0) {
         setAvailableTime('')
@@ -52,9 +48,17 @@ export default function UsageBar({ usageStatus, onUsageClick, onReset }: UsageBa
     return () => clearInterval(interval)
   }, [cooldownUntil])
   
-  // Calculate progress percentage
-  const totalDaily = dailyCap + 3; // dailyCap + OVERDRAFT
-  const progressPercentage = Math.min((usedToday / totalDaily) * 100, 100)
+  // Find the most constrained window (for display)
+  const displayWindow = windowUsages.length > 0 
+    ? windowUsages.reduce((most, current) => 
+        current.percentage > most.percentage ? current : most
+      )
+    : null
+  
+  // Calculate progress percentage based on the most constrained window
+  const progressPercentage = displayWindow 
+    ? Math.min((displayWindow.used / (displayWindow.window.quota + overdraft)) * 100, 100)
+    : 0
   
   // Color mapping - force red during cooldown
   const getProgressColor = () => {
@@ -98,6 +102,21 @@ export default function UsageBar({ usageStatus, onUsageClick, onReset }: UsageBa
     }
   }
   
+  // Tooltip with detailed usage info
+  const getTooltipContent = () => {
+    if (!displayWindow) return ''
+    
+    if (windowUsages.length === 1) {
+      // Single window - show detailed info
+      const { used, window } = displayWindow
+      return `${used}/${window.quota} images used (${window.label})`
+    }
+    
+    // Multiple windows - show all constraints
+    return windowUsages.map(w => 
+      `${w.window.label}: ${w.used}/${w.window.quota} (${Math.round(w.percentage)}%)`
+    ).join('\n')
+  }
 
   return (
     <Box
@@ -138,68 +157,73 @@ export default function UsageBar({ usageStatus, onUsageClick, onReset }: UsageBa
         height: 40
       }}
     >
-        <Box sx={{ flex: 1, minWidth: 0 }}>
-          <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 0.5 }}>
-            <Typography variant="caption" sx={{ fontWeight: 600, color: 'rgba(255,255,255,0.8)', fontSize: '0.7rem' }}>
-              Usage
-            </Typography>
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
-              <Typography variant="caption" sx={{ 
-                fontWeight: 600, 
-                color: availableTime ? '#ff6b6b' : getProgressColor(),
-                textTransform: 'uppercase',
-                fontSize: '0.65rem',
-                animation: availableTime ? 'pulse 2s infinite' : 'none',
-                '@keyframes pulse': {
-                  '0%': { opacity: 1 },
-                  '50%': { opacity: 0.7 },
-                  '100%': { opacity: 1 }
-                }
-              }}>
-                {getStatusText()}
+      <Box sx={{ flex: 1, minWidth: 0 }}>
+        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 0.5 }}>
+          <Tooltip title={<pre style={{ margin: 0, fontSize: '0.75rem' }}>{getTooltipContent()}</pre>} arrow>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, cursor: 'help' }}>
+              <Typography variant="caption" sx={{ fontWeight: 600, color: 'rgba(255,255,255,0.8)', fontSize: '0.7rem' }}>
+                {tierName} Tier
               </Typography>
-              {onReset && (
-                <IconButton
-                  size="small"
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    onReset()
-                  }}
-                  sx={{
-                    color: 'rgba(255,255,255,0.6)',
-                    '&:hover': {
-                      color: 'rgba(255,255,255,0.9)',
-                      backgroundColor: 'rgba(255,255,255,0.1)'
-                    },
-                    padding: '2px',
-                    minWidth: 'auto',
-                    width: '20px',
-                    height: '20px'
-                  }}
-                >
-                  <Refresh sx={{ fontSize: '0.8rem' }} />
-                </IconButton>
-              )}
+              <Info sx={{ fontSize: '0.75rem', color: 'rgba(255,255,255,0.5)' }} />
             </Box>
-          </Box>
-          
-          <Box sx={{ position: 'relative' }}>
-            <LinearProgress
-              variant="determinate"
-              value={progressPercentage}
-              sx={{
-                height: 5,
-                borderRadius: 2,
-                backgroundColor: 'rgba(255,255,255,0.1)',
-                '& .MuiLinearProgress-bar': {
-                  background: `linear-gradient(90deg, ${getProgressColor()}, ${getProgressColor()}CC)`,
-                  borderRadius: 2,
-                  boxShadow: `0 0 8px ${getProgressColor()}40`
-                }
-              }}
-            />
+          </Tooltip>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+            <Typography variant="caption" sx={{ 
+              fontWeight: 600, 
+              color: availableTime ? '#ff6b6b' : getProgressColor(),
+              textTransform: 'uppercase',
+              fontSize: '0.65rem',
+              animation: availableTime ? 'pulse 2s infinite' : 'none',
+              '@keyframes pulse': {
+                '0%': { opacity: 1 },
+                '50%': { opacity: 0.7 },
+                '100%': { opacity: 1 }
+              }
+            }}>
+              {getStatusText()}
+            </Typography>
+            {onReset && (
+              <IconButton
+                size="small"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  onReset()
+                }}
+                sx={{
+                  color: 'rgba(255,255,255,0.6)',
+                  '&:hover': {
+                    color: 'rgba(255,255,255,0.9)',
+                    backgroundColor: 'rgba(255,255,255,0.1)'
+                  },
+                  padding: '2px',
+                  minWidth: 'auto',
+                  width: '20px',
+                  height: '20px'
+                }}
+              >
+                <Refresh sx={{ fontSize: '0.8rem' }} />
+              </IconButton>
+            )}
           </Box>
         </Box>
+        
+        <Box sx={{ position: 'relative' }}>
+          <LinearProgress
+            variant="determinate"
+            value={progressPercentage}
+            sx={{
+              height: 5,
+              borderRadius: 2,
+              backgroundColor: 'rgba(255,255,255,0.1)',
+              '& .MuiLinearProgress-bar': {
+                background: `linear-gradient(90deg, ${getProgressColor()}, ${getProgressColor()}CC)`,
+                borderRadius: 2,
+                boxShadow: `0 0 8px ${getProgressColor()}40`
+              }
+            }}
+          />
+        </Box>
       </Box>
+    </Box>
   )
 }

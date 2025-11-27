@@ -3,7 +3,7 @@
 import { useRef, useState, useEffect, useCallback } from 'react'
 import { Stage, Layer, Line, Image as KonvaImage, Transformer, Rect, Group, Text, Circle } from 'react-konva'
 import { Box, Slider, ToggleButton, ToggleButtonGroup, Button, Divider, Typography, IconButton, Menu, MenuItem, Tooltip, List, ListItem, ListItemText, ListItemSecondaryAction, ButtonGroup, Card, CardActionArea, CardContent as MUICardContent, Drawer, Fab, TextField, Checkbox, CircularProgress, Snackbar, Alert } from '@mui/material'
-import { Add, Delete, Visibility, VisibilityOff, Undo, Redo, ZoomIn, ZoomOut, PanToolAlt, Gesture, Colorize, Layers as LayersIcon, Settings, AutoFixHigh, Close, Campaign, ContentCopy, Crop, ContentCut, Info, DesignServices, SettingsSuggest, SwapHoriz } from '@mui/icons-material'
+import { Add, Delete, Visibility, VisibilityOff, Undo, Redo, ZoomIn, ZoomOut, PanToolAlt, Gesture, Colorize, Layers as LayersIcon, Settings, AutoFixHigh, Close, Campaign, ContentCopy, Crop, ContentCut, Info, DesignServices, SettingsSuggest, SwapHoriz, Download } from '@mui/icons-material'
 import { LightMode, DarkMode } from '@mui/icons-material'
 import { useTheme } from '@mui/material/styles'
 import { httpsCallable } from 'firebase/functions'
@@ -11,7 +11,7 @@ import { FirebaseError } from 'firebase/app'
 import { useThemeMode } from '@/components/providers/ThemeProvider'
 import { useAuth } from '@/components/providers/AuthProvider'
 import UsageBar from './UsageBar'
-import { UsageData, handleRequest, getCurrentUsageStatus } from '@/lib/usageTracker'
+import { UsageData, handleRequest, getCurrentUsageStatus, TierType } from '@/lib/usageTracker'
 import { InteractiveHoverButton } from '@/components/ui/interactive-hover-button'
 import { functions as firebaseFunctions } from '@/lib/firebaseClient'
 import { getCanvasData, saveCanvasData } from '@/lib/firestore'
@@ -118,7 +118,7 @@ const findStoneDetails = (key: string) => {
 }
 
 export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
-  const { user } = useAuth()
+  const { user, tier } = useAuth()
   const stageRef = useRef<any>(null)
   const transformerRef = useRef<any>(null)
   const [tool, setTool] = useState<'brush' | 'eraser' | 'hand'>('brush')
@@ -308,22 +308,49 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
   // Signature Style states
   const [signatureStyles, setSignatureStyles] = useState<Array<{id: string, name: string, url: string}>>([])
 
-  // Usage tracking
+  // Usage tracking with tier support
   const [usageData, setUsageData] = useState<UsageData>(() => {
     // Initialize from localStorage or create new
     if (typeof window !== 'undefined') {
       const saved = localStorage.getItem('zuve-usage-data')
       if (saved) {
         try {
-          return JSON.parse(saved)
+          const parsed = JSON.parse(saved)
+          // Ensure tier is set (default to 'free' if missing)
+          if (!parsed.tier) {
+            parsed.tier = 'free'
+          }
+          return parsed
         } catch (e) {
           console.warn('Failed to parse usage data from localStorage')
         }
       }
     }
-    return { events: [], cooldownUntil: undefined }
+    return { events: [], cooldownUntil: undefined, tier: 'free' }
   })
   const [usageStatus, setUsageStatus] = useState(() => getCurrentUsageStatus(usageData))
+  
+  // Function to change user tier (can be called when user upgrades/downgrades)
+  const setUserTier = useCallback((newTier: TierType) => {
+    const newUsageData = { ...usageData, tier: newTier }
+    setUsageData(newUsageData)
+    setUsageStatus(getCurrentUsageStatus(newUsageData))
+    
+    // Save to localStorage
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('zuve-usage-data', JSON.stringify(newUsageData))
+    }
+    
+    console.log('User tier updated to:', newTier)
+  }, [usageData])
+  
+  // Sync tier from Firebase auth when it changes
+  useEffect(() => {
+    if (tier && tier !== usageData.tier) {
+      console.log('Syncing tier from Firebase:', tier, '(was:', usageData.tier, ')')
+      setUserTier(tier)
+    }
+  }, [tier, usageData.tier, setUserTier])
 
   // Usage tracking functions
   const updateUsageStatus = useCallback(() => {
@@ -351,15 +378,16 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
   }, [usageData])
 
   const resetUsage = useCallback(() => {
-    const newUsageData = { events: [], cooldownUntil: undefined }
+    // Preserve the tier when resetting
+    const newUsageData = { events: [], cooldownUntil: undefined, tier: usageData.tier || 'free' }
     setUsageData(newUsageData)
     setUsageStatus(getCurrentUsageStatus(newUsageData))
     
-    // Clear from localStorage
+    // Update localStorage (don't remove, just reset events)
     if (typeof window !== 'undefined') {
-      localStorage.removeItem('zuve-usage-data')
+      localStorage.setItem('zuve-usage-data', JSON.stringify(newUsageData))
     }
-  }, [])
+  }, [usageData.tier])
 
   const captureSketchSnapshot = useCallback(() => {
     try {
@@ -555,6 +583,23 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
   const handleHarmonizeClick = useCallback(() => {
     void callDesignFunction('harmonize')
   }, [callDesignFunction])
+
+  const handleDownloadImage = useCallback(() => {
+    if (!currentViewImageUrl) return
+    
+    // Create a temporary link element
+    const link = document.createElement('a')
+    link.href = currentViewImageUrl
+    link.download = `zuve-render-${Date.now()}.png`
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    
+    setSnackbar({
+      message: 'Image downloaded successfully!',
+      severity: 'success'
+    })
+  }, [currentViewImageUrl])
 
   // Motif Browser functions
   const startCreatingMotif = useCallback(() => {
@@ -3358,6 +3403,41 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
             />
           </Box>
         </Tooltip>
+
+        {/* Download Button - appears when image is generated */}
+        {(renderedImageUrl || harmonizedImageUrl) && (
+          <Tooltip title="Download Image">
+            <IconButton
+              onClick={(e) => {
+                e.stopPropagation()
+                handleDownloadImage()
+              }}
+              sx={{
+                position: 'absolute',
+                top: 20,
+                right: 70,
+                width: 40,
+                height: 40,
+                borderRadius: '50%',
+                background: 'linear-gradient(135deg, #4CAF50 0%, #45a049 100%)',
+                color: 'white',
+                boxShadow: '0 4px 12px rgba(76, 175, 80, 0.4)',
+                border: '2px solid rgba(255, 255, 255, 0.2)',
+                transition: 'all 0.3s ease',
+                '&:hover': {
+                  transform: 'scale(1.1)',
+                  boxShadow: '0 6px 20px rgba(76, 175, 80, 0.6)',
+                  background: 'linear-gradient(135deg, #45a049 0%, #3d8b40 100%)',
+                },
+                '&:active': {
+                  transform: 'scale(0.95)',
+                }
+              }}
+            >
+              <Download sx={{ fontSize: '1.2rem' }} />
+            </IconButton>
+          </Tooltip>
+        )}
 
         {/* Pulsing Edge Effect */}
         {auraAssistActive && (

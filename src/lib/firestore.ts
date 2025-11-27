@@ -14,6 +14,19 @@ import {
   writeBatch
 } from 'firebase/firestore'
 import { db } from './firebaseClient'
+import { TierType } from './usageTracker'
+
+// User profile type
+export type UserProfile = {
+  uid: string
+  email: string
+  displayName?: string
+  tier: TierType  // 'free' | 'plus' | 'pro' | 'max'
+  subscriptionId?: string
+  subscriptionStatus?: 'active' | 'cancelled' | 'past_due' | 'trialing'
+  createdAt: Timestamp | Date
+  updatedAt: Timestamp | Date
+}
 
 // Project types
 export type Project = {
@@ -34,6 +47,10 @@ export type CanvasData = {
   updatedAt: Timestamp | Date
 }
 
+// User profile helpers
+export const userProfileDoc = (userId: string) =>
+  doc(db, 'users', userId, 'profile', 'data')
+
 // Projects collection helpers
 export const projectsCollection = (userId: string) => 
   collection(db, 'users', userId, 'projects')
@@ -43,6 +60,113 @@ export const projectDoc = (userId: string, projectId: string) =>
 
 export const canvasDoc = (userId: string, projectId: string) =>
   doc(db, 'users', userId, 'projects', projectId, 'canvas', 'data')
+
+// ==================== User Profile Functions ====================
+
+// Get user profile
+export async function getUserProfile(userId: string): Promise<UserProfile | null> {
+  if (!userId) return null
+  
+  try {
+    const profileRef = userProfileDoc(userId)
+    const profileSnap = await getDoc(profileRef)
+    
+    if (!profileSnap.exists()) {
+      // Profile doesn't exist yet - will be created on first login
+      console.log('User profile not found, will create on demand')
+      return null
+    }
+    
+    const data = profileSnap.data()
+    return {
+      ...data,
+      createdAt: data.createdAt?.toDate() || new Date(),
+      updatedAt: data.updatedAt?.toDate() || new Date(),
+    } as UserProfile
+  } catch (error: any) {
+    console.error('Error fetching user profile:', error)
+    if (error?.code === 'unavailable') {
+      console.warn('Firestore is unavailable, returning null')
+      return null
+    }
+    return null
+  }
+}
+
+// Create user profile
+export async function createUserProfile(
+  userId: string, 
+  data: { tier: TierType; email?: string; displayName?: string }
+): Promise<UserProfile> {
+  if (!userId) throw new Error('User ID is required')
+  
+  try {
+    const profileRef = userProfileDoc(userId)
+    const newProfile = {
+      uid: userId,
+      email: data.email || '',
+      displayName: data.displayName || '',
+      tier: data.tier || 'free',
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    }
+    
+    await setDoc(profileRef, newProfile, { merge: true })
+    console.log('User profile created:', userId, 'tier:', data.tier)
+    
+    return {
+      ...newProfile,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    } as UserProfile
+  } catch (error) {
+    console.error('Error creating user profile:', error)
+    throw error
+  }
+}
+
+// Update user tier
+export async function updateUserTier(userId: string, tier: TierType): Promise<void> {
+  if (!userId) throw new Error('User ID is required')
+  
+  try {
+    const profileRef = userProfileDoc(userId)
+    await updateDoc(profileRef, {
+      tier,
+      updatedAt: serverTimestamp(),
+    })
+    console.log('User tier updated:', userId, 'new tier:', tier)
+  } catch (error) {
+    console.error('Error updating user tier:', error)
+    throw error
+  }
+}
+
+// Update subscription info (when user purchases)
+export async function updateUserSubscription(
+  userId: string, 
+  tier: TierType,
+  subscriptionId: string,
+  subscriptionStatus: 'active' | 'cancelled' | 'past_due' | 'trialing'
+): Promise<void> {
+  if (!userId) throw new Error('User ID is required')
+  
+  try {
+    const profileRef = userProfileDoc(userId)
+    await updateDoc(profileRef, {
+      tier,
+      subscriptionId,
+      subscriptionStatus,
+      updatedAt: serverTimestamp(),
+    })
+    console.log('User subscription updated:', userId, tier, subscriptionStatus)
+  } catch (error) {
+    console.error('Error updating user subscription:', error)
+    throw error
+  }
+}
+
+// ==================== Project Functions ====================
 
 // Get all projects for a user
 export async function getUserProjects(userId: string): Promise<Project[]> {

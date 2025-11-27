@@ -1,128 +1,276 @@
-// Usage tracking algorithm implementation
-const WINDOW = 30 * 24 * 3600; // 30 days in seconds
-const MAX_QUOTA = 400;
-const OVERDRAFT = 3; // allow 2-3 extra images as UX buffer
-const BASE_COOLDOWN_HOURS = 2; // minimum cooldown when overdraft exceeded
+// Tier-based usage tracking system
+
+export type TierType = 'free' | 'plus' | 'pro' | 'max'
 
 export interface UsageData {
-  events: number[]; // timestamps
-  cooldownUntil?: number; // timestamp
+  events: number[] // timestamps
+  cooldownUntil?: number // timestamp
+  tier?: TierType // user's current tier
+}
+
+interface WindowConstraint {
+  duration: number // in seconds
+  quota: number
+  label: string // for display (e.g., "48h", "30d")
+}
+
+interface TierConfig {
+  name: string
+  windows: WindowConstraint[]
+  overdraft: number
+  cooldownHours: number
+}
+
+const TIERS: Record<TierType, TierConfig> = {
+  free: {
+    name: 'Free',
+    windows: [
+      { duration: 48 * 3600, quota: 5, label: '48h' }
+    ],
+    overdraft: 1,
+    cooldownHours: 1
+  },
+  plus: {
+    name: 'Plus',
+    windows: [
+      { duration: 48 * 3600, quota: 10, label: '48h' },        // Short-term burst protection
+      { duration: 30 * 24 * 3600, quota: 60, label: '30d' }    // Long-term monthly cap
+    ],
+    overdraft: 2,
+    cooldownHours: 2
+  },
+  pro: {
+    name: 'Pro',
+    windows: [
+      { duration: 30 * 24 * 3600, quota: 1000, label: '30d' }
+    ],
+    overdraft: 5,
+    cooldownHours: 0.5
+  },
+  max: {
+    name: 'Max',
+    windows: [
+      { duration: 30 * 24 * 3600, quota: 2000, label: '30d' }
+    ],
+    overdraft: 10,
+    cooldownHours: 0
+  }
+}
+
+interface WindowUsage {
+  window: WindowConstraint
+  used: number
+  remaining: number
+  percentage: number
 }
 
 export interface UsageStatus {
-  allowed: number;
-  remainingQuota: number;
-  dailyCap: number;
-  color: 'green' | 'yellow' | 'red';
-  cooldownUntil?: number;
-  daysLeft: number;
-  usedToday: number;
-  allowedToday: number;
+  allowed: number
+  color: 'green' | 'yellow' | 'red'
+  cooldownUntil?: number
+  tier: TierType
+  tierName: string
+  windowUsages: WindowUsage[] // Info about each window constraint
+  bottleneckWindow?: WindowConstraint // Which window is most restrictive
+  remainingInBottleneck: number
+  overdraft: number
 }
 
-function pruneEvents(events: number[], now: number): number[] {
-  const cutoff = now - WINDOW;
-  return events.filter(t => t >= cutoff);
+/**
+ * Count events within a specific time window
+ */
+function countInWindow(events: number[], now: number, windowDuration: number): number {
+  const cutoff = now - windowDuration
+  return events.filter(t => t >= cutoff).length
 }
 
-function countToday(events: number[], now: number): number {
-  const last24h = now - 86400; // 24 hours ago
-  return events.filter(t => t >= last24h).length;
+/**
+ * Prune events older than the longest window in the tier
+ */
+function pruneEvents(events: number[], now: number, tier: TierConfig): number[] {
+  const longestWindow = Math.max(...tier.windows.map(w => w.duration))
+  const cutoff = now - longestWindow
+  return events.filter(t => t >= cutoff)
 }
 
-function computeCaps(events: number[], now: number) {
-  const prunedEvents = pruneEvents(events, now);
-  const used = prunedEvents.length;
-  const remainingQuota = MAX_QUOTA - used;
+/**
+ * Determine the color based on usage across all windows
+ */
+function determineColor(
+  windowUsages: WindowUsage[],
+  overdraft: number,
+  inCooldown: boolean
+): 'green' | 'yellow' | 'red' {
+  if (inCooldown) return 'red'
   
-  let daysLeft: number;
-  if (used === 0) {
-    daysLeft = 30;
-  } else {
-    const oldest = Math.min(...prunedEvents);
-    const windowEnd = oldest + WINDOW;
-    daysLeft = Math.max(1, Math.ceil((windowEnd - now) / 86400));
-  }
+  // Find the most constrained window (highest percentage)
+  const maxPercentage = Math.max(...windowUsages.map(w => w.percentage))
   
-  const dailyCap = Math.floor(remainingQuota / daysLeft);
-  return { events: prunedEvents, remainingQuota, daysLeft, dailyCap };
+  // Green: comfortable margin (< 80% of quota)
+  if (maxPercentage < 80) return 'green'
+  
+  // Yellow: approaching limit or in overdraft zone
+  // Check if any window has reached quota but still has overdraft room
+  const anyInOverdraft = windowUsages.some(w => w.remaining < overdraft && w.remaining >= 0)
+  if (anyInOverdraft || maxPercentage < 100) return 'yellow'
+  
+  // Red: exceeded quota
+  return 'red'
 }
 
-function indicatorColor(events: number[], now: number, dailyCap: number): 'green' | 'yellow' | 'red' {
-  const last24h = countToday(events, now);
-  if (last24h <= dailyCap) {
-    return 'green';
-  } else if (last24h <= dailyCap + OVERDRAFT) {
-    return 'yellow';
-  } else {
-    return 'red';
-  }
-}
-
-export function handleRequest(user: UsageData, now: number, requestedN: number = 1): UsageStatus {
-  console.log('handleRequest - cooldownUntil:', user.cooldownUntil, 'now:', now, 'inCooldown:', user.cooldownUntil && now < user.cooldownUntil);
+/**
+ * Main request handler - checks usage against tier limits and records events
+ */
+export function handleRequest(
+  user: UsageData, 
+  now: number, 
+  requestedN: number = 1
+): UsageStatus {
+  // Default to free tier if not specified
+  const tierKey = user.tier || 'free'
+  const tier = TIERS[tierKey]
   
-  // Check if user is in cooldown
-  if (user.cooldownUntil && now < user.cooldownUntil) {
-    const { events, remainingQuota, daysLeft, dailyCap } = computeCaps(user.events, now);
-    const usedToday = countToday(events, now);
-    console.log('In cooldown - returning red status');
+  console.log(`handleRequest - tier: ${tierKey}, requested: ${requestedN}, cooldownUntil:`, user.cooldownUntil)
+  
+  // Check cooldown first
+  const inCooldown = !!(user.cooldownUntil && now < user.cooldownUntil)
+  
+  if (inCooldown) {
+    console.log('In cooldown - blocking request')
+    
+    // Still calculate usage info for display
+    const prunedEvents = pruneEvents(user.events, now, tier)
+    const windowUsages: WindowUsage[] = tier.windows.map(window => {
+      const used = countInWindow(prunedEvents, now, window.duration)
+      const remaining = window.quota - used
+      return {
+        window,
+        used,
+        remaining,
+        percentage: (used / window.quota) * 100
+      }
+    })
+    
+    const bottleneckWindow = windowUsages.reduce((most, current) => 
+      current.percentage > most.percentage ? current : most
+    ).window
+    
     return {
       allowed: 0,
-      remainingQuota,
-      dailyCap,
       color: 'red',
       cooldownUntil: user.cooldownUntil,
-      daysLeft,
-      usedToday,
-      allowedToday: 0
-    };
+      tier: tierKey,
+      tierName: tier.name,
+      windowUsages,
+      bottleneckWindow,
+      remainingInBottleneck: Math.min(...windowUsages.map(w => w.remaining)),
+      overdraft: tier.overdraft
+    }
   }
-
-  const { events, remainingQuota, daysLeft, dailyCap } = computeCaps(user.events, now);
-  const usedToday = countToday(events, now);
-  let allowedToday = dailyCap - usedToday;
-  if (allowedToday < 0) allowedToday = 0;
-
-  const allowedWithOverdraft = allowedToday + OVERDRAFT;
-  let allowed = Math.min(requestedN, remainingQuota, allowedWithOverdraft);
-
-  // If user asked for more than allowed_with_overdraft OR if they've exceeded daily limit -> compute cooldown
-  if (requestedN > allowedWithOverdraft || (usedToday >= dailyCap + OVERDRAFT)) {
-    const excess = Math.max(requestedN - allowedWithOverdraft, 1); // At least 1 for exceeding daily limit
-    const extraHours = Math.ceil(excess / 20.0); // 1 extra hour per ~20 extra images
-    const cooldownHours = BASE_COOLDOWN_HOURS + extraHours;
-    user.cooldownUntil = now + cooldownHours * 3600;
-    // Allow the allowed_with_overdraft amount now (partial fulfill)
-    allowed = Math.min(allowedWithOverdraft, remainingQuota);
+  
+  // Prune old events
+  const prunedEvents = pruneEvents(user.events, now, tier)
+  
+  // Check all window constraints
+  const windowUsages: WindowUsage[] = tier.windows.map(window => {
+    const used = countInWindow(prunedEvents, now, window.duration)
+    const remaining = window.quota - used
+    return {
+      window,
+      used,
+      remaining,
+      percentage: (used / window.quota) * 100
+    }
+  })
+  
+  // Find the most restrictive window (least remaining capacity)
+  let mostRestrictiveRemaining = Infinity
+  let bottleneckWindow = tier.windows[0]
+  
+  for (const usage of windowUsages) {
+    if (usage.remaining < mostRestrictiveRemaining) {
+      mostRestrictiveRemaining = usage.remaining
+      bottleneckWindow = usage.window
+    }
   }
-
+  
+  console.log('Window constraints:', windowUsages.map(w => 
+    `${w.window.label}: ${w.used}/${w.window.quota}`
+  ))
+  console.log('Most restrictive remaining:', mostRestrictiveRemaining)
+  
+  // Calculate allowed with overdraft
+  const baseAllowed = Math.max(0, mostRestrictiveRemaining)
+  const allowedWithOverdraft = baseAllowed + tier.overdraft
+  let allowed = Math.min(requestedN, allowedWithOverdraft)
+  
+  // Trigger cooldown if request exceeds what's available with overdraft
+  if (requestedN > allowedWithOverdraft && tier.cooldownHours > 0) {
+    console.log(`Triggering cooldown: requested ${requestedN} > allowed ${allowedWithOverdraft}`)
+    user.cooldownUntil = now + tier.cooldownHours * 3600
+    // Allow up to the quota (no overdraft when triggering cooldown)
+    allowed = Math.max(0, baseAllowed)
+  }
+  
   // Record allowed images as events
-  const newEvents = [...events];
+  const newEvents = [...prunedEvents]
   for (let i = 0; i < allowed; i++) {
-    newEvents.push(now + i * 0.001); // Add tiny offset to avoid duplicate timestamps
+    newEvents.push(now + i * 0.001) // Add tiny offset to avoid duplicate timestamps
   }
   
   // Update user events
-  user.events = pruneEvents(newEvents, now);
-
-  const color = user.cooldownUntil && now < user.cooldownUntil ? 'red' : indicatorColor(user.events, now, dailyCap);
+  user.events = newEvents
   
-  console.log('UsageTracker - usedToday:', usedToday, 'dailyCap:', dailyCap, 'OVERDRAFT:', OVERDRAFT, 'cooldownUntil:', user.cooldownUntil, 'color:', color, 'inCooldown:', user.cooldownUntil && now < user.cooldownUntil);
+  // Recalculate window usages with new events
+  const updatedWindowUsages: WindowUsage[] = tier.windows.map(window => {
+    const used = countInWindow(newEvents, now, window.duration)
+    const remaining = window.quota - used
+    return {
+      window,
+      used,
+      remaining,
+      percentage: (used / window.quota) * 100
+    }
+  })
+  
+  // Update most restrictive
+  mostRestrictiveRemaining = Math.min(...updatedWindowUsages.map(w => w.remaining))
+  
+  const color = determineColor(
+    updatedWindowUsages, 
+    tier.overdraft,
+    !!(user.cooldownUntil && now < user.cooldownUntil)
+  )
+  
+  console.log(`Result - allowed: ${allowed}, color: ${color}, remaining: ${mostRestrictiveRemaining}`)
   
   return {
     allowed,
-    remainingQuota: MAX_QUOTA - user.events.length,
-    dailyCap,
     color,
     cooldownUntil: user.cooldownUntil,
-    daysLeft,
-    usedToday: countToday(user.events, now),
-    allowedToday: Math.max(0, dailyCap - countToday(user.events, now))
-  };
+    tier: tierKey,
+    tierName: tier.name,
+    windowUsages: updatedWindowUsages,
+    bottleneckWindow,
+    remainingInBottleneck: mostRestrictiveRemaining,
+    overdraft: tier.overdraft
+  }
 }
 
-export function getCurrentUsageStatus(user: UsageData): UsageStatus {
-  const now = Math.floor(Date.now() / 1000);
-  return handleRequest(user, now, 0); // Request 0 to just get status
+/**
+ * Get current usage status without making a request
+ */
+export function getCurrentUsageStatus(user: UsageData, tier?: TierType): UsageStatus {
+  const now = Math.floor(Date.now() / 1000)
+  if (tier && tier !== user.tier) {
+    user.tier = tier
+  }
+  return handleRequest(user, now, 0) // Request 0 to just get status
+}
+
+/**
+ * Helper to get tier configuration
+ */
+export function getTierConfig(tier: TierType): TierConfig {
+  return TIERS[tier]
 }
