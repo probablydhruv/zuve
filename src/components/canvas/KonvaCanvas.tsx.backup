@@ -1,0 +1,3126 @@
+'use client'
+
+import { useRef, useState, useEffect, useCallback } from 'react'
+import { Stage, Layer, Line, Image as KonvaImage, Transformer, Rect, Group, Text } from 'react-konva'
+import { Box, Slider, Stack, ToggleButton, ToggleButtonGroup, Button, Divider, Typography, IconButton, Menu, MenuItem, Tooltip, List, ListItem, ListItemText, ListItemSecondaryAction, ButtonGroup, Chip, Card, CardActionArea, CardContent as MUICardContent, Drawer, Fab, TextField } from '@mui/material'
+import { Add, Delete, Visibility, VisibilityOff, Undo, Redo, ZoomIn, ZoomOut, PanToolAlt, Gesture, Colorize, Layers as LayersIcon, Settings, AutoFixHigh, Close, Campaign, ContentCopy, Crop, ContentCut } from '@mui/icons-material'
+import UsageBar from './UsageBar'
+import { UsageData, handleRequest, getCurrentUsageStatus } from '@/lib/usageTracker'
+
+const STONES = [
+  { key: 'none', label: 'None', icon: '⚪' },
+  { key: 'diamond', label: 'Diamond', icon: '💎' },
+  { key: 'ruby', label: 'Ruby', icon: '🔴' },
+  { key: 'sapphire', label: 'Sapphire', icon: '🔵', hasSubmenu: true },
+  { key: 'emerald', label: 'Emerald', icon: '🟢' },
+  { key: 'amethyst', label: 'Amethyst', icon: '🟣' },
+  { key: 'pearl', label: 'Pearl', icon: '⚪' },
+]
+
+const SAPPHIRE_VARIANTS = [
+  { key: 'sapphire_blue', label: 'Blue Sapphire', icon: '🔵' },
+  { key: 'sapphire_yellow', label: 'Yellow Sapphire', icon: '🟡' },
+  { key: 'sapphire_pink', label: 'Pink Sapphire', icon: '🩷' },
+]
+
+const METALS = [
+  { key: 'yellow_gold', label: 'Yellow Gold' },
+  { key: 'white_gold', label: 'White Gold' },
+  { key: 'rose_gold', label: 'Rose Gold' },
+  { key: 'silver', label: 'Silver' },
+]
+
+type LayerItem = { id: string; name: string; visible: boolean; opacity: number }
+
+// Helper function to find stone details from either STONES or SAPPHIRE_VARIANTS
+const findStoneDetails = (key: string) => {
+  const stone = STONES.find(s => s.key === key)
+  if (stone) return stone
+  
+  const sapphireVariant = SAPPHIRE_VARIANTS.find(s => s.key === key)
+  if (sapphireVariant) return sapphireVariant
+  
+  return { key, label: 'None', icon: '⚪' }
+}
+
+export default function KonvaCanvas() {
+  const stageRef = useRef<any>(null)
+  const transformerRef = useRef<any>(null)
+  const [tool, setTool] = useState<'brush' | 'eraser' | 'hand'>('brush')
+  const [size, setSize] = useState(6)
+  const [color, setColor] = useState('#000000')
+  const [brushOpacity, setBrushOpacity] = useState(1)
+  const [lines, setLines] = useState<any[]>([])
+  const isDrawing = useRef(false)
+  const [zoom, setZoom] = useState(1)
+  const minZoom = 0.5
+  const maxZoom = 3
+  const [lastTouchDistance, setLastTouchDistance] = useState(0)
+  const [lastTouchCenter, setLastTouchCenter] = useState({ x: 0, y: 0 })
+  const [isGesturing, setIsGesturing] = useState(false)
+  const [rotationOverlay, setRotationOverlay] = useState<{ imageId: string; angle: number; x: number; y: number } | null>(null)
+  const [canvasInfluence, setCanvasInfluence] = useState(100)
+  const [currentPressure, setCurrentPressure] = useState(1)
+  const [isApplePencilActive, setIsApplePencilActive] = useState(false)
+  const [toolbarPosition, setToolbarPosition] = useState({ x: 0, y: 12 })
+  const [isDragging, setIsDragging] = useState(false)
+  const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 })
+  const [uploadedImages, setUploadedImages] = useState<any[]>([])
+  const [selectedImageId, setSelectedImageId] = useState<string | null>(null)
+  const [imageElements, setImageElements] = useState<{ [key: string]: HTMLImageElement }>({})
+  const [canvasSize, setCanvasSize] = useState({ width: 800, height: 600 })
+  const [cropMode, setCropMode] = useState(false)
+  const [cropArea, setCropArea] = useState<{ x: number; y: number; width: number; height: number } | null>(null)
+  const [isDrawingCrop, setIsDrawingCrop] = useState(false)
+  const [selectionMode, setSelectionMode] = useState(false)
+  const [selectionPath, setSelectionPath] = useState<number[]>([])
+  const [isDrawingSelection, setIsDrawingSelection] = useState(false)
+  const [selectedArea, setSelectedArea] = useState<any[]>([])
+  const [rightSidebarTab, setRightSidebarTab] = useState<'jewellery' | 'more'>('jewellery')
+
+  // History management for undo/redo
+  const [history, setHistory] = useState<any[][]>([[]])
+  const [historyIndex, setHistoryIndex] = useState(0)
+  const maxHistorySize = 50
+
+  // Layers state with content association
+  const [layers, setLayers] = useState<LayerItem[]>([
+    { id: '1', name: 'Layer 1', visible: true, opacity: 1 },
+  ])
+  const [activeLayerId, setActiveLayerId] = useState('1')
+
+  // Debug active layer changes
+  useEffect(() => {
+    console.log('Active layer changed to:', activeLayerId)
+  }, [activeLayerId])
+  
+  // Associate content with layers
+  const [lineLayerMap, setLineLayerMap] = useState<{ [lineIndex: number]: string }>({})
+  const [imageLayerMap, setImageLayerMap] = useState<{ [imageId: string]: string }>({})
+
+  // Debug layer mapping changes
+  useEffect(() => {
+    console.log('Image layer map updated:', imageLayerMap)
+  }, [imageLayerMap])
+
+  // Ensure all images have layer associations
+  useEffect(() => {
+    if (uploadedImages.length > 0) {
+      const updatedImageLayerMap = { ...imageLayerMap }
+      let needsUpdate = false
+      
+      uploadedImages.forEach(image => {
+        if (!updatedImageLayerMap[image.id]) {
+          updatedImageLayerMap[image.id] = activeLayerId
+          needsUpdate = true
+          console.log('Assigning unassigned image to active layer:', image.id, activeLayerId)
+        }
+      })
+      
+      if (needsUpdate) {
+        setImageLayerMap(updatedImageLayerMap)
+      }
+    }
+  }, [uploadedImages.length, activeLayerId]) // Removed imageLayerMap from dependencies
+
+  // Ensure all lines have layer associations
+  useEffect(() => {
+    if (lines.length > 0) {
+      const updatedLineLayerMap = { ...lineLayerMap }
+      let needsUpdate = false
+      
+      lines.forEach((_, index) => {
+        if (!updatedLineLayerMap[index]) {
+          updatedLineLayerMap[index] = activeLayerId
+          needsUpdate = true
+          console.log('Assigning unassigned line to active layer:', index, activeLayerId)
+        }
+      })
+      
+      if (needsUpdate) {
+        setLineLayerMap(updatedLineLayerMap)
+      }
+    }
+  }, [lines.length, activeLayerId]) // Removed lineLayerMap from dependencies
+
+  // AI settings (UI only)
+  const [primaryStone, setPrimaryStone] = useState('none')
+  const [secondaryStone, setSecondaryStone] = useState<string | null>(null)
+  const [metal, setMetal] = useState(METALS[0].key)
+  const [contextText, setContextText] = useState('')
+  const [stoneAnchor, setStoneAnchor] = useState<null | HTMLElement>(null)
+  const [stoneType, setStoneType] = useState<'primary' | 'secondary'>('primary')
+  const [metalAnchor, setMetalAnchor] = useState<null | HTMLElement>(null)
+  const [sapphireSubmenuAnchor, setSapphireSubmenuAnchor] = useState<null | HTMLElement>(null)
+
+  // Mobile drawer states
+  const [leftDrawerOpen, setLeftDrawerOpen] = useState(false)
+  const [rightDrawerOpen, setRightDrawerOpen] = useState(false)
+
+  // Usage tracking
+  const [usageData, setUsageData] = useState<UsageData>(() => {
+    // Initialize from localStorage or create new
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('zuve-usage-data')
+      if (saved) {
+        try {
+          return JSON.parse(saved)
+        } catch (e) {
+          console.warn('Failed to parse usage data from localStorage')
+        }
+      }
+    }
+    return { events: [], cooldownUntil: undefined }
+  })
+  const [usageStatus, setUsageStatus] = useState(() => getCurrentUsageStatus(usageData))
+
+  // Usage tracking functions
+  const updateUsageStatus = useCallback(() => {
+    const newStatus = getCurrentUsageStatus(usageData)
+    setUsageStatus(newStatus)
+    console.log('updateUsageStatus - cooldownUntil:', usageData.cooldownUntil, 'color:', newStatus.color)
+  }, [usageData])
+
+  const trackUsage = useCallback((action: 'generate' | 'harmonize') => {
+    const now = Math.floor(Date.now() / 1000)
+    const newUsageData = { ...usageData }
+    console.log('trackUsage - before handleRequest - cooldownUntil:', newUsageData.cooldownUntil)
+    const result = handleRequest(newUsageData, now, 1)
+    console.log('trackUsage - after handleRequest - cooldownUntil:', newUsageData.cooldownUntil, 'color:', result.color)
+    
+    setUsageData(newUsageData)
+    setUsageStatus(result)
+    
+    // Save to localStorage
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('zuve-usage-data', JSON.stringify(newUsageData))
+    }
+    
+    return result
+  }, [usageData])
+
+  const resetUsage = useCallback(() => {
+    const newUsageData = { events: [], cooldownUntil: undefined }
+    setUsageData(newUsageData)
+    setUsageStatus(getCurrentUsageStatus(newUsageData))
+    
+    // Clear from localStorage
+    if (typeof window !== 'undefined') {
+      localStorage.removeItem('zuve-usage-data')
+    }
+  }, [])
+
+  // Image upload handler
+  const handleImageUpload = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    if (!file) return
+
+    // Validate file type
+    if (!file.type.startsWith('image/')) {
+      alert('Please select a valid image file')
+      return
+    }
+
+    const reader = new FileReader()
+    reader.onload = (e) => {
+      const imageUrl = e.target?.result as string
+      const img = new Image()
+      
+      img.onload = () => {
+        const imageId = `img_${Date.now()}`
+        const newImage = {
+          id: imageId,
+          x: 100,
+          y: 100,
+          width: Math.min(img.width, 300), // Max width 300px
+          height: Math.min(img.height, 300), // Max height 300px
+          rotation: 0,
+          scaleX: 1,
+          scaleY: 1,
+          originalWidth: img.width,
+          originalHeight: img.height
+        }
+        
+                setUploadedImages(prev => [...prev, newImage])
+                setImageElements(prev => ({ ...prev, [imageId]: img }))
+                setImageLayerMap(prev => {
+                  const newMap = { ...prev, [imageId]: activeLayerId }
+                  console.log('Image uploaded to layer:', activeLayerId, 'Image ID:', imageId)
+                  return newMap
+                })
+                setSelectedImageId(imageId)
+      }
+      
+      img.src = imageUrl
+    }
+    
+    reader.readAsDataURL(file)
+  }, [])
+
+  // Remove uploaded image
+  const removeImage = useCallback((imageId: string) => {
+    setUploadedImages(prev => prev.filter(img => img.id !== imageId))
+    setImageElements(prev => {
+      const newElements = { ...prev }
+      delete newElements[imageId]
+      return newElements
+    })
+    if (selectedImageId === imageId) {
+      setSelectedImageId(null)
+      if (transformerRef.current) {
+        transformerRef.current.nodes([])
+        transformerRef.current.getLayer().batchDraw()
+      }
+    }
+  }, [selectedImageId])
+
+  // Remove selected image
+  const removeSelectedImage = useCallback(() => {
+    if (selectedImageId) {
+      removeImage(selectedImageId)
+    }
+  }, [selectedImageId, removeImage])
+
+  // Replicate selected image
+  const replicateSelectedImage = useCallback(() => {
+    if (selectedImageId) {
+      const selectedImage = uploadedImages.find(img => img.id === selectedImageId)
+      if (selectedImage) {
+        const newImage = {
+          ...selectedImage,
+          id: `img_${Date.now()}`,
+          x: selectedImage.x + 20, // Offset by 20px
+          y: selectedImage.y + 20,
+        }
+        setUploadedImages(prev => [...prev, newImage])
+        setImageElements(prev => ({ ...prev, [newImage.id]: imageElements[selectedImageId] }))
+        setSelectedImageId(newImage.id)
+      }
+    }
+  }, [selectedImageId, uploadedImages, imageElements])
+
+  // Crop selected image - enable crop mode
+  const cropSelectedImage = useCallback(() => {
+    if (selectedImageId) {
+      const selectedImage = uploadedImages.find(img => img.id === selectedImageId)
+      if (selectedImage) {
+        setCropMode(true)
+        // Initialize crop area to cover the entire selected image
+        setCropArea({
+          x: selectedImage.x,
+          y: selectedImage.y,
+          width: selectedImage.width,
+          height: selectedImage.height
+        })
+        console.log('Crop mode enabled - Drag the corners to adjust crop area')
+      }
+    }
+  }, [selectedImageId, uploadedImages])
+
+  // Apply crop to selected image
+  const applyCrop = useCallback(() => {
+    if (selectedImageId && cropArea) {
+      const selectedImage = uploadedImages.find(img => img.id === selectedImageId)
+      if (selectedImage) {
+        // Calculate crop coordinates relative to the image
+        const imageX = selectedImage.x
+        const imageY = selectedImage.y
+        const imageWidth = selectedImage.width
+        const imageHeight = selectedImage.height
+        
+        // Convert canvas coordinates to image coordinates
+        const cropX = Math.max(0, (cropArea.x - imageX) / imageWidth)
+        const cropY = Math.max(0, (cropArea.y - imageY) / imageHeight)
+        const cropWidth = Math.min(1, cropArea.width / imageWidth)
+        const cropHeight = Math.min(1, cropArea.height / imageHeight)
+        
+        // Update image with crop data
+        setUploadedImages(prev => 
+          prev.map(img => 
+            img.id === selectedImageId 
+              ? { 
+                  ...img, 
+                  cropX, 
+                  cropY, 
+                  cropWidth, 
+                  cropHeight,
+                  x: cropArea.x,
+                  y: cropArea.y,
+                  width: cropArea.width,
+                  height: cropArea.height
+                }
+              : img
+          )
+        )
+        
+        console.log('Crop applied:', { cropX, cropY, cropWidth, cropHeight })
+      }
+    }
+    setCropMode(false)
+    setCropArea(null)
+  }, [selectedImageId, cropArea, uploadedImages])
+
+  // Cancel crop mode
+  const cancelCrop = useCallback(() => {
+    setCropMode(false)
+    setCropArea(null)
+    setIsDrawingCrop(false)
+  }, [])
+
+  // Start selection mode
+  const startSelectionMode = useCallback(() => {
+    setSelectionMode(true)
+    setSelectionPath([])
+    setSelectedArea([])
+    console.log('Selection mode enabled - Draw around the area you want to replicate')
+  }, [])
+
+  // Cancel selection mode
+  const cancelSelection = useCallback(() => {
+    setSelectionMode(false)
+    setSelectionPath([])
+    setSelectedArea([])
+    setIsDrawingSelection(false)
+  }, [])
+
+  // Helper function to check if a point is inside a polygon (selection path)
+  const isPointInPolygon = (point: { x: number; y: number }, polygon: number[]) => {
+    let inside = false
+    for (let i = 0, j = polygon.length - 2; i < polygon.length; j = i, i += 2) {
+      const xi = polygon[i]
+      const yi = polygon[i + 1]
+      const xj = polygon[j]
+      const yj = polygon[j + 1]
+      
+      if (((yi > point.y) !== (yj > point.y)) && 
+          (point.x < (xj - xi) * (point.y - yi) / (yj - yi) + xi)) {
+        inside = !inside
+      }
+    }
+    return inside
+  }
+
+  // Check if a line intersects with the selection polygon and get selected points
+  const getSelectedLinePoints = (points: number[], selectionPath: number[]) => {
+    if (selectionPath.length < 6) return null // Need at least 3 points for a polygon
+    
+    const selectedPoints: number[] = []
+    let hasSelectedPoints = false
+    let lastPointInSelection = false
+    
+    for (let i = 0; i < points.length; i += 2) {
+      const point = { x: points[i], y: points[i + 1] }
+      const currentPointInSelection = isPointInPolygon(point, selectionPath)
+      
+      // Add point if it's in selection
+      if (currentPointInSelection) {
+        selectedPoints.push(points[i], points[i + 1])
+        hasSelectedPoints = true
+      } else if (lastPointInSelection && i > 0) {
+        // If previous point was in selection but current isn't,
+        // we need to find the intersection point
+        const prevPoint = { x: points[i - 2], y: points[i - 1] }
+        const intersection = findLinePolygonIntersection(prevPoint, point, selectionPath)
+        if (intersection) {
+          selectedPoints.push(intersection.x, intersection.y)
+        }
+      } else if (!lastPointInSelection && currentPointInSelection && i > 0) {
+        // If current point is in selection but previous wasn't,
+        // we need to find the intersection point
+        const prevPoint = { x: points[i - 2], y: points[i - 1] }
+        const intersection = findLinePolygonIntersection(prevPoint, point, selectionPath)
+        if (intersection) {
+          selectedPoints.push(intersection.x, intersection.y)
+        }
+      }
+      
+      lastPointInSelection = currentPointInSelection
+    }
+    
+    return hasSelectedPoints ? selectedPoints : null
+  }
+
+  // Find intersection point between a line segment and polygon
+  const findLinePolygonIntersection = (p1: { x: number; y: number }, p2: { x: number; y: number }, polygon: number[]) => {
+    for (let i = 0; i < polygon.length; i += 2) {
+      const p3 = { x: polygon[i], y: polygon[i + 1] }
+      const p4 = { x: polygon[(i + 2) % polygon.length], y: polygon[(i + 3) % polygon.length] }
+      
+      const intersection = getLineIntersection(p1, p2, p3, p4)
+      if (intersection) {
+        return intersection
+      }
+    }
+    return null
+  }
+
+  // Get intersection point of two line segments
+  const getLineIntersection = (p1: { x: number; y: number }, p2: { x: number; y: number }, p3: { x: number; y: number }, p4: { x: number; y: number }) => {
+    const denom = (p1.x - p2.x) * (p3.y - p4.y) - (p1.y - p2.y) * (p3.x - p4.x)
+    if (Math.abs(denom) < 1e-10) return null // Lines are parallel
+    
+    const t = ((p1.x - p3.x) * (p3.y - p4.y) - (p1.y - p3.y) * (p3.x - p4.x)) / denom
+    const u = -((p1.x - p2.x) * (p1.y - p3.y) - (p1.y - p2.y) * (p1.x - p3.x)) / denom
+    
+    if (t >= 0 && t <= 1 && u >= 0 && u <= 1) {
+      return {
+        x: p1.x + t * (p2.x - p1.x),
+        y: p1.y + t * (p2.y - p1.y)
+      }
+    }
+    return null
+  }
+
+  // Check if an image intersects with the selection and get crop area using exact polygon
+  const getImageSelectionData = (image: any, selectionPath: number[]) => {
+    if (selectionPath.length < 6) return null
+    
+    // Check if any corner of the image is within the selection polygon
+    const corners = [
+      { x: image.x, y: image.y },
+      { x: image.x + image.width, y: image.y },
+      { x: image.x, y: image.y + image.height },
+      { x: image.x + image.width, y: image.y + image.height }
+    ]
+    
+    const cornersInSelection = corners.filter(corner => isPointInPolygon(corner, selectionPath))
+    
+    if (cornersInSelection.length === 0) {
+      return null // No intersection
+    }
+    
+    // If all corners are in selection, select the entire image
+    if (cornersInSelection.length === 4) {
+      return {
+        cropX: 0,
+        cropY: 0,
+        cropWidth: 1,
+        cropHeight: 1,
+        intersectX: image.x,
+        intersectY: image.y,
+        intersectWidth: image.width,
+        intersectHeight: image.height,
+        isFullSelection: true
+      }
+    }
+    
+    // For partial selection, we'll create a mask-based approach
+    // Instead of rectangular cropping, we'll store the selection polygon
+    // and use it as a mask when rendering
+    
+    // Find the bounding box of the selection polygon
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+    for (let i = 0; i < selectionPath.length; i += 2) {
+      minX = Math.min(minX, selectionPath[i])
+      minY = Math.min(minY, selectionPath[i + 1])
+      maxX = Math.max(maxX, selectionPath[i])
+      maxY = Math.max(maxY, selectionPath[i + 1])
+    }
+    
+    // Check if image intersects with selection bounding box
+    const imageRight = image.x + image.width
+    const imageBottom = image.y + image.height
+    
+    if (maxX < image.x || minX > imageRight || maxY < image.y || minY > imageBottom) {
+      return null // No intersection
+    }
+    
+    // Calculate intersection area
+    const intersectX = Math.max(minX, image.x)
+    const intersectY = Math.max(minY, image.y)
+    const intersectRight = Math.min(maxX, imageRight)
+    const intersectBottom = Math.min(maxY, imageBottom)
+    
+    const intersectWidth = intersectRight - intersectX
+    const intersectHeight = intersectBottom - intersectY
+    
+    // Calculate crop coordinates relative to the image
+    const cropX = Math.max(0, (intersectX - image.x) / image.width)
+    const cropY = Math.max(0, (intersectY - image.y) / image.height)
+    const cropWidth = Math.min(1, intersectWidth / image.width)
+    const cropHeight = Math.min(1, intersectHeight / image.height)
+    
+    return {
+      cropX: Math.max(0, Math.min(1, cropX)),
+      cropY: Math.max(0, Math.min(1, cropY)),
+      cropWidth: Math.max(0, Math.min(1, cropWidth)),
+      cropHeight: Math.max(0, Math.min(1, cropHeight)),
+      intersectX,
+      intersectY,
+      intersectWidth,
+      intersectHeight,
+      isFullSelection: false,
+      selectionPolygon: selectionPath, // Store the exact selection polygon
+      usePolygonMask: true // Flag to use polygon masking instead of rectangular crop
+    }
+  }
+
+  // Calculate convex hull of points (Graham scan algorithm)
+  const getConvexHull = (points: { x: number; y: number }[]) => {
+    if (points.length < 3) return points
+    
+    // Find the bottom-most point (and leftmost in case of tie)
+    let bottom = 0
+    for (let i = 1; i < points.length; i++) {
+      if (points[i].y < points[bottom].y || 
+          (points[i].y === points[bottom].y && points[i].x < points[bottom].x)) {
+        bottom = i
+      }
+    }
+    
+    // Swap with first point
+    [points[0], points[bottom]] = [points[bottom], points[0]]
+    
+    // Sort points by polar angle with respect to bottom point
+    const pivot = points[0]
+    points.slice(1).sort((a, b) => {
+      const angleA = Math.atan2(a.y - pivot.y, a.x - pivot.x)
+      const angleB = Math.atan2(b.y - pivot.y, b.x - pivot.x)
+      return angleA - angleB
+    })
+    
+    // Build convex hull
+    const hull = [points[0], points[1]]
+    
+    for (let i = 2; i < points.length; i++) {
+      while (hull.length > 1 && 
+             crossProduct(hull[hull.length - 2], hull[hull.length - 1], points[i]) <= 0) {
+        hull.pop()
+      }
+      hull.push(points[i])
+    }
+    
+    return hull
+  }
+
+  // Calculate cross product of three points
+  const crossProduct = (O: { x: number; y: number }, A: { x: number; y: number }, B: { x: number; y: number }) => {
+    return (A.x - O.x) * (B.y - O.y) - (A.y - O.y) * (B.x - O.x)
+  }
+
+  // Apply selection and replicate content
+  const applySelection = useCallback(() => {
+    if (selectedArea.length > 0) {
+      // Create copies of all selected content
+      const newContent = selectedArea.map((item, index) => {
+        if (item.type === 'line') {
+          // Replicate drawn lines with offset
+          return {
+            ...item,
+            id: `line_${Date.now()}_${index}`,
+            points: item.points.map((point: number, i: number) => 
+              i % 2 === 0 ? point + 30 : point + 30 // Offset by 30px
+            )
+          }
+        } else if (item.type === 'image') {
+          // Replicate uploaded images with crop data
+          const newImage = {
+            ...item,
+            id: `img_${Date.now()}_${index}`,
+            x: item.x + 30,
+            y: item.y + 30,
+            // Keep crop data for rendering
+            cropX: item.cropX,
+            cropY: item.cropY,
+            cropWidth: item.cropWidth,
+            cropHeight: item.cropHeight
+          }
+          
+          // If it's a partial selection, adjust the image size
+          if (item.isPartial) {
+            newImage.width = item.width
+            newImage.height = item.height
+          }
+          
+          return newImage
+        }
+        return item
+      })
+
+      // Add replicated content to canvas
+      const newLines = newContent.filter(item => item.type === 'line')
+      const newImages = newContent.filter(item => item.type === 'image')
+      
+      if (newLines.length > 0) {
+        setLines(prev => {
+          const updatedLines = [...prev, ...newLines]
+          // Associate new lines with active layer
+          const newLineLayerMap = { ...lineLayerMap }
+          newLines.forEach((_, index) => {
+            newLineLayerMap[prev.length + index] = activeLayerId
+          })
+          setLineLayerMap(newLineLayerMap)
+          return updatedLines
+        })
+      }
+      
+      if (newImages.length > 0) {
+        setUploadedImages(prev => [...prev, ...newImages])
+        // Copy image elements and associate with active layer
+        const newImageLayerMap = { ...imageLayerMap }
+        newImages.forEach(img => {
+          if (imageElements[img.originalId]) {
+            setImageElements(prev => ({ ...prev, [img.id]: imageElements[img.originalId] }))
+            newImageLayerMap[img.id] = activeLayerId
+          }
+        })
+        setImageLayerMap(newImageLayerMap)
+      }
+
+      console.log('Selection applied - Content replicated:', newContent.length, 'items')
+      console.log('Partial selections:', newContent.filter(item => item.isPartial).length)
+    }
+    
+    // Reset selection mode
+    setSelectionMode(false)
+    setSelectionPath([])
+    setSelectedArea([])
+    setIsDrawingSelection(false)
+  }, [selectedArea, imageElements])
+
+  // Update usage status on mount and when usageData changes
+  useEffect(() => {
+    updateUsageStatus()
+  }, [updateUsageStatus])
+
+  // Undo/Redo functions
+  const saveToHistory = useCallback((newLines: any[]) => {
+    setHistory(prev => {
+      const newHistory = prev.slice(0, historyIndex + 1)
+      newHistory.push([...newLines])
+      // Limit history size
+      if (newHistory.length > maxHistorySize) {
+        newHistory.shift()
+        return newHistory
+      }
+      return newHistory
+    })
+    setHistoryIndex(prev => Math.min(prev + 1, maxHistorySize - 1))
+  }, [historyIndex, maxHistorySize])
+
+  const undo = useCallback(() => {
+    console.log('Undo function called, historyIndex:', historyIndex, 'history.length:', history.length)
+    if (historyIndex > 0) {
+      const newIndex = historyIndex - 1
+      console.log('Undoing to index:', newIndex)
+      setHistoryIndex(newIndex)
+      setLines([...history[newIndex]])
+    }
+  }, [historyIndex, history])
+
+  const redo = useCallback(() => {
+    if (historyIndex < history.length - 1) {
+      const newIndex = historyIndex + 1
+      setHistoryIndex(newIndex)
+      setLines([...history[newIndex]])
+    }
+  }, [historyIndex, history])
+
+  // Touch and Apple Pencil support
+  const getPointerPosition = (e: any) => {
+    const stage = e.target.getStage()
+    const pos = stage.getPointerPosition()
+    
+    // For Apple Pencil, try to get pressure and tilt information
+    if (e.evt && e.evt.pointerType === 'pen') {
+      const pressure = e.evt.pressure || 1
+      const tiltX = e.evt.tiltX || 0
+      const tiltY = e.evt.tiltY || 0
+      
+      return {
+        x: pos.x,
+        y: pos.y,
+        pressure: Math.max(0.1, Math.min(1, pressure)),
+        tiltX,
+        tiltY,
+        isApplePencil: true
+      }
+    }
+    
+    return {
+      x: pos.x,
+      y: pos.y,
+      pressure: 1,
+      tiltX: 0,
+      tiltY: 0,
+      isApplePencil: false
+    }
+  }
+
+  const handlePointerDown = (e: any) => {
+    // Prevent default to avoid scrolling on touch devices
+    e.evt.preventDefault()
+    
+    // Check if we're interacting with an image - if so, don't start drawing
+    if (e.target && e.target.getClassName && e.target.getClassName() === 'Image') {
+      return // Don't start drawing when interacting with images
+    }
+    
+    // Palm rejection: Only allow drawing with Apple Pencil or single touch
+    const pointerType = e.evt?.pointerType
+    const isPalm = e.evt?.width > 20 || e.evt?.height > 20 // Large touch area indicates palm
+    
+    if (isPalm) {
+      return // Ignore palm touches
+    }
+    
+    const pointerData = getPointerPosition(e)
+    
+    // Handle selection mode
+    if (selectionMode) {
+      setIsDrawingSelection(true)
+      setSelectionPath([pointerData.x, pointerData.y])
+      return
+    }
+    
+    // Handle crop mode
+    if (cropMode && selectedImageId) {
+      const selectedImage = uploadedImages.find(img => img.id === selectedImageId)
+      if (selectedImage) {
+        // Constrain click to within the selected image bounds
+        const imageX = selectedImage.x
+        const imageY = selectedImage.y
+        const imageWidth = selectedImage.width
+        const imageHeight = selectedImage.height
+        
+        // Check if click is within image bounds
+        if (pointerData.x >= imageX && pointerData.x <= imageX + imageWidth &&
+            pointerData.y >= imageY && pointerData.y <= imageY + imageHeight) {
+          setIsDrawingCrop(true)
+          setCropArea({
+            x: pointerData.x,
+            y: pointerData.y,
+            width: 0,
+            height: 0
+          })
+        }
+      }
+      return
+    }
+    
+    // Only allow drawing with brush and eraser tools
+    if (tool !== 'brush' && tool !== 'eraser') {
+      return
+    }
+    
+    isDrawing.current = true
+    
+    // Update Apple Pencil status and pressure
+    setIsApplePencilActive(pointerData.isApplePencil)
+    setCurrentPressure(pointerData.pressure)
+    
+    // Calculate dynamic brush size based on pressure (for Apple Pencil)
+    const pressureMultiplier = pointerData.isApplePencil ? pointerData.pressure : 1
+    const dynamicSize = Math.max(1, size * pressureMultiplier)
+    
+    // Calculate dynamic opacity based on pressure
+    const dynamicOpacity = Math.max(0.1, brushOpacity * pressureMultiplier)
+    
+    const newLine = { 
+      tool, 
+      points: [pointerData.x, pointerData.y], 
+      stroke: color, 
+      strokeWidth: dynamicSize, 
+      opacity: dynamicOpacity,
+      pressure: pointerData.pressure,
+      isApplePencil: pointerData.isApplePencil
+    }
+    
+    // Save current state to history before starting new drawing
+    saveToHistory(lines)
+    
+    // Add the new line and associate it with the active layer
+    setLines(prev => {
+      const newLines = [...prev, newLine]
+      setLineLayerMap(prevMap => ({
+        ...prevMap,
+        [newLines.length - 1]: activeLayerId
+      }))
+      return newLines
+    })
+  }
+
+  const handlePointerMove = (e: any) => {
+    // Handle selection drawing
+    if (selectionMode && isDrawingSelection) {
+      const pointerData = getPointerPosition(e)
+      setSelectionPath(prev => [...prev, pointerData.x, pointerData.y])
+      return
+    }
+    
+    // Handle crop area drawing
+    if (cropMode && isDrawingCrop && selectedImageId) {
+      const selectedImage = uploadedImages.find(img => img.id === selectedImageId)
+      if (selectedImage) {
+        const pointerData = getPointerPosition(e)
+        const imageX = selectedImage.x
+        const imageY = selectedImage.y
+        const imageWidth = selectedImage.width
+        const imageHeight = selectedImage.height
+        
+        setCropArea(prev => {
+          if (!prev) return null
+          
+          // Constrain the crop area to within the image bounds
+          const newWidth = Math.max(0, Math.min(pointerData.x - prev.x, imageX + imageWidth - prev.x))
+          const newHeight = Math.max(0, Math.min(pointerData.y - prev.y, imageY + imageHeight - prev.y))
+          
+          return {
+            ...prev,
+            width: newWidth,
+            height: newHeight
+          }
+        })
+      }
+      return
+    }
+    
+    if (!isDrawing.current) return
+    
+    // Check if we're interacting with an image - if so, stop drawing
+    if (e.target && e.target.getClassName && e.target.getClassName() === 'Image') {
+      isDrawing.current = false
+      return
+    }
+    
+    // Prevent default to avoid scrolling on touch devices
+    e.evt.preventDefault()
+    
+    const stage = e.target.getStage()
+    const pointerData = getPointerPosition(e)
+    
+    // Update pressure tracking
+    setCurrentPressure(pointerData.pressure)
+    
+    // Calculate dynamic brush size based on pressure
+    const pressureMultiplier = pointerData.isApplePencil ? pointerData.pressure : 1
+    const dynamicSize = Math.max(1, size * pressureMultiplier)
+    
+    // Calculate dynamic opacity based on pressure
+    const dynamicOpacity = Math.max(0.1, brushOpacity * pressureMultiplier)
+    
+    setLines(prev => {
+      const next = prev.slice()
+      const last = next[next.length - 1]
+      
+      // Add point with pressure data
+      last.points = last.points.concat([pointerData.x, pointerData.y])
+      
+      // Update stroke width and opacity based on pressure
+      last.strokeWidth = dynamicSize
+      last.opacity = dynamicOpacity
+      last.pressure = pointerData.pressure
+      
+      return next
+    })
+  }
+
+  const handlePointerUp = (e: any) => {
+    // Prevent default to avoid scrolling on touch devices
+    e.evt.preventDefault()
+    
+    // Handle selection completion
+    if (selectionMode && isDrawingSelection) {
+      setIsDrawingSelection(false)
+      
+      // Find content within the selection path
+      const selectedContent: any[] = []
+      
+      // Check lines within selection - only get selected points
+      lines.forEach((line, lineIndex) => {
+        const selectedPoints = getSelectedLinePoints(line.points, selectionPath)
+        if (selectedPoints && selectedPoints.length >= 4) { // Need at least 2 points
+          selectedContent.push({ 
+            ...line, 
+            type: 'line', 
+            id: `line_${Date.now()}_${lineIndex}`,
+            points: selectedPoints,
+            isPartial: selectedPoints.length < line.points.length
+          })
+        }
+      })
+      
+      // Check images within selection - get crop data
+      uploadedImages.forEach((image, imageIndex) => {
+        const imageSelectionData = getImageSelectionData(image, selectionPath)
+        if (imageSelectionData) {
+          selectedContent.push({ 
+            ...image, 
+            type: 'image', 
+            originalId: image.id,
+            id: `img_${Date.now()}_${imageIndex}`,
+            cropX: imageSelectionData.cropX,
+            cropY: imageSelectionData.cropY,
+            cropWidth: imageSelectionData.cropWidth,
+            cropHeight: imageSelectionData.cropHeight,
+            x: imageSelectionData.intersectX,
+            y: imageSelectionData.intersectY,
+            width: imageSelectionData.intersectWidth,
+            height: imageSelectionData.intersectHeight,
+            isPartial: imageSelectionData.cropWidth < 1 || imageSelectionData.cropHeight < 1
+          })
+        }
+      })
+      
+      setSelectedArea(selectedContent)
+      console.log('Selection completed - Found', selectedContent.length, 'items')
+      return
+    }
+    
+    // Handle crop completion
+    if (cropMode && isDrawingCrop) {
+      setIsDrawingCrop(false)
+      // Crop area is now complete, user can apply or cancel
+      return
+    }
+    
+    isDrawing.current = false
+  }
+
+  // Legacy mouse handlers for desktop compatibility
+  const handleMouseDown = (e: any) => {
+    handlePointerDown(e)
+  }
+
+  const handleMouseMove = (e: any) => {
+    handlePointerMove(e)
+  }
+
+  const handleMouseUp = (e: any) => {
+    handlePointerUp(e)
+  }
+
+  // Touch gesture helpers
+  const getTouchDistance = (touches: TouchList) => {
+    if (touches.length < 2) return 0
+    const touch1 = touches[0]
+    const touch2 = touches[1]
+    const dx = touch1.clientX - touch2.clientX
+    const dy = touch1.clientY - touch2.clientY
+    return Math.sqrt(dx * dx + dy * dy)
+  }
+
+  const getTouchCenter = (touches: TouchList) => {
+    if (touches.length === 0) return { x: 0, y: 0 }
+    if (touches.length === 1) {
+      return { x: touches[0].clientX, y: touches[0].clientY }
+    }
+    const touch1 = touches[0]
+    const touch2 = touches[1]
+    return {
+      x: (touch1.clientX + touch2.clientX) / 2,
+      y: (touch1.clientY + touch2.clientY) / 2
+    }
+  }
+
+  // Touch event handlers
+  const handleTouchStart = (e: any) => {
+    // Prevent default to avoid scrolling
+    e.evt.preventDefault()
+    
+    const touches = e.evt.touches
+    const touchCount = touches.length
+    
+    if (touchCount === 1) {
+      // Check if we're interacting with an image - if so, don't start drawing
+      if (e.target && e.target.getClassName && e.target.getClassName() === 'Image') {
+        return // Don't start drawing when interacting with images
+      }
+      // Single touch - start drawing
+      handlePointerDown(e)
+    } else if (touchCount === 2) {
+      // Two finger touch - start gesture mode
+      setIsGesturing(true)
+      setLastTouchDistance(getTouchDistance(touches))
+      setLastTouchCenter(getTouchCenter(touches))
+    }
+  }
+
+  const handleTouchMove = (e: any) => {
+    // Prevent default to avoid scrolling
+    e.evt.preventDefault()
+    
+    const touches = e.evt.touches
+    const touchCount = touches.length
+    
+    if (touchCount === 1 && !isGesturing) {
+      // Check if we're interacting with an image - if so, stop drawing
+      if (e.target && e.target.getClassName && e.target.getClassName() === 'Image') {
+        isDrawing.current = false
+        return
+      }
+      // Single touch - continue drawing
+      handlePointerMove(e)
+    } else if (touchCount === 2 && isGesturing) {
+      // Two finger touch - handle zoom and pan
+      const currentDistance = getTouchDistance(touches)
+      const currentCenter = getTouchCenter(touches)
+      
+      if (lastTouchDistance > 0) {
+        // Pinch to zoom
+        const scale = currentDistance / lastTouchDistance
+        const newZoom = Math.max(minZoom, Math.min(maxZoom, zoom * scale))
+        setZoom(newZoom)
+        
+        // Pan based on center movement
+        const stage = e.target.getStage()
+        if (stage) {
+          const dx = currentCenter.x - lastTouchCenter.x
+          const dy = currentCenter.y - lastTouchCenter.y
+          
+          // Apply pan offset
+          stage.x(stage.x() + dx)
+          stage.y(stage.y() + dy)
+        }
+      }
+      
+      setLastTouchDistance(currentDistance)
+      setLastTouchCenter(currentCenter)
+    }
+  }
+
+  const handleTouchEnd = (e: any) => {
+    // Prevent default to avoid scrolling
+    e.evt.preventDefault()
+    
+    const touches = e.evt.touches
+    const touchCount = touches.length
+    
+    if (touchCount === 0) {
+      // All touches ended
+      if (isGesturing) {
+        setIsGesturing(false)
+        setLastTouchDistance(0)
+      } else {
+        handlePointerUp(e)
+      }
+    } else if (touchCount === 1 && isGesturing) {
+      // Switched from two fingers to one - stop gesturing
+      setIsGesturing(false)
+      setLastTouchDistance(0)
+    }
+  }
+
+  // Floating toolbar drag handlers
+  const handleToolbarMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault()
+    setIsDragging(true)
+    const rect = e.currentTarget.getBoundingClientRect()
+    setDragOffset({
+      x: e.clientX - rect.left,
+      y: e.clientY - rect.top
+    })
+  }
+
+  const handleToolbarTouchStart = (e: React.TouchEvent) => {
+    e.preventDefault()
+    setIsDragging(true)
+    const rect = e.currentTarget.getBoundingClientRect()
+    const touch = e.touches[0]
+    setDragOffset({
+      x: touch.clientX - rect.left,
+      y: touch.clientY - rect.top
+    })
+  }
+
+  const handleToolbarDrag = (e: MouseEvent | TouchEvent) => {
+    if (!isDragging) return
+    
+    e.preventDefault()
+    const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX
+    const clientY = 'touches' in e ? e.touches[0].clientY : e.clientY
+    
+    const canvasContainer = document.querySelector('[data-canvas-container]') as HTMLElement
+    if (!canvasContainer) return
+    
+    const containerRect = canvasContainer.getBoundingClientRect()
+    const newX = clientX - containerRect.left - dragOffset.x
+    const newY = clientY - containerRect.top - dragOffset.y
+    
+    // Constrain to canvas bounds
+    const constrainedX = Math.max(0, Math.min(newX, containerRect.width - 300)) // 300px is approximate toolbar width
+    const constrainedY = Math.max(0, Math.min(newY, containerRect.height - 50)) // 50px is approximate toolbar height
+    
+    setToolbarPosition({ x: constrainedX, y: constrainedY })
+  }
+
+  const handleToolbarDragEnd = () => {
+    setIsDragging(false)
+  }
+
+  // Add global event listeners for dragging
+  useEffect(() => {
+    if (isDragging) {
+      const handleMouseMove = (e: MouseEvent) => handleToolbarDrag(e)
+      const handleTouchMove = (e: TouchEvent) => handleToolbarDrag(e)
+      const handleMouseUp = () => handleToolbarDragEnd()
+      const handleTouchEnd = () => handleToolbarDragEnd()
+
+      document.addEventListener('mousemove', handleMouseMove)
+      document.addEventListener('touchmove', handleTouchMove, { passive: false })
+      document.addEventListener('mouseup', handleMouseUp)
+      document.addEventListener('touchend', handleTouchEnd)
+
+      return () => {
+        document.removeEventListener('mousemove', handleMouseMove)
+        document.removeEventListener('touchmove', handleTouchMove)
+        document.removeEventListener('mouseup', handleMouseUp)
+        document.removeEventListener('touchend', handleTouchEnd)
+      }
+    }
+  }, [isDragging, dragOffset])
+
+  // Keyboard shortcuts
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Don't trigger shortcuts if user is typing in an input field
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
+        return
+      }
+      
+      // Check for Cmd+Z (Mac) or Ctrl+Z (Windows/Linux) for undo
+      if ((e.metaKey || e.ctrlKey) && e.key === 'z' && !e.shiftKey) {
+        e.preventDefault()
+        console.log('Undo keyboard shortcut triggered')
+        undo()
+      }
+      // Check for Cmd+Shift+Z (Mac) or Ctrl+Y (Windows/Linux) for redo
+      else if ((e.metaKey && e.shiftKey && e.key === 'z') || (e.ctrlKey && e.key === 'y')) {
+        e.preventDefault()
+        redo()
+      }
+      // Check for Delete or Backspace to remove selected image
+      else if ((e.key === 'Delete' || e.key === 'Backspace') && selectedImageId) {
+        e.preventDefault()
+        removeSelectedImage()
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [undo, redo, selectedImageId, removeSelectedImage])
+
+  // Standard cursor values for drawing tools
+  const getBrushCursor = useCallback((size: number) => {
+    // Use crosshair cursor for precise drawing
+    return 'crosshair'
+  }, [])
+
+  const getEraserCursor = useCallback((size: number) => {
+    // Use cell cursor for erasing (similar to selection)
+    return 'cell'
+  }, [])
+
+  // Calculate canvas size based on container
+  const calculateCanvasSize = useCallback(() => {
+    const canvasContainer = document.querySelector('[data-canvas-container]') as HTMLElement
+    if (canvasContainer) {
+      const containerRect = canvasContainer.getBoundingClientRect()
+      const padding = 32 // Account for padding (16px on each side)
+      const newWidth = Math.max(400, containerRect.width - padding)
+      const newHeight = Math.max(300, containerRect.height - padding)
+      setCanvasSize({ width: newWidth, height: newHeight })
+    }
+  }, [])
+
+  // Handle window resize
+  useEffect(() => {
+    const handleResize = () => {
+      calculateCanvasSize()
+      if (stageRef.current) {
+        stageRef.current.width(canvasSize.width)
+        stageRef.current.height(canvasSize.height)
+        stageRef.current.batchDraw()
+      }
+    }
+
+    // Initial calculation
+    calculateCanvasSize()
+    
+    // Set up resize listener
+    window.addEventListener('resize', handleResize)
+    
+    // Recalculate on mount
+    const timeoutId = setTimeout(calculateCanvasSize, 100)
+    
+    return () => {
+      window.removeEventListener('resize', handleResize)
+      clearTimeout(timeoutId)
+    }
+  }, [calculateCanvasSize, canvasSize.width, canvasSize.height])
+
+  return (
+    <Box sx={{ 
+      height: '100%', 
+      width: '100%',
+      overflow: 'hidden',
+      display: 'grid', 
+      gridTemplateColumns: { xs: '1fr', md: '260px 1fr 300px' }, 
+      gridTemplateRows: '1fr'
+    }}>
+      {/* Left Sidebar */}
+      <Box sx={{ display: { xs: 'none', md: 'flex' }, flexDirection: 'column', borderRight: '1px solid', borderColor: 'divider' }}>
+        <Box sx={{ p: 2 }}>
+          <Typography variant="subtitle2" sx={{ fontWeight: 'bold' }}>Layers</Typography>
+        </Box>
+        <List dense sx={{ flex: 1, overflowY: 'auto', px: 1 }}>
+          {layers.map(l => (
+                    <ListItem key={l.id} onClick={() => {
+                      console.log('Switching to layer:', l.id)
+                      setActiveLayerId(l.id)
+                    }} sx={{ cursor: 'pointer', border: '1px solid rgba(0,0,0,0.08)', borderRadius: 1, mb: 0.5, backgroundColor: l.id === activeLayerId ? 'action.selected' : 'transparent' }}>
+              <ListItemText primary={l.name} />
+              <ListItemSecondaryAction>
+                <IconButton edge="end" size="small" onClick={() => {
+                  console.log('Toggling visibility for layer:', l.id, 'Current visible:', l.visible)
+                  setLayers(prev => prev.map(x => x.id === l.id ? { ...x, visible: !x.visible } : x))
+                }}>
+                  {l.visible ? <Visibility fontSize="small" /> : <VisibilityOff fontSize="small" />}
+                </IconButton>
+                {layers.length > 1 && (
+                  <IconButton edge="end" size="small" onClick={() => {
+                    // Delete layer and clean up mappings
+                    setLayers(prev => prev.filter(x => x.id !== l.id))
+                    // Move content from deleted layer to the first remaining layer
+                    const remainingLayers = layers.filter(x => x.id !== l.id)
+                    if (remainingLayers.length > 0) {
+                      const targetLayerId = remainingLayers[0].id
+                      setLineLayerMap(prev => {
+                        const newMap = { ...prev }
+                        Object.keys(newMap).forEach(key => {
+                          const numKey = parseInt(key)
+                          if (newMap[numKey] === l.id) {
+                            newMap[numKey] = targetLayerId
+                          }
+                        })
+                        return newMap
+                      })
+                      setImageLayerMap(prev => {
+                        const newMap = { ...prev }
+                        Object.keys(newMap).forEach(key => {
+                          if (newMap[key] === l.id) {
+                            newMap[key] = targetLayerId
+                          }
+                        })
+                        return newMap
+                      })
+                      // Set active layer to the target layer
+                      setActiveLayerId(targetLayerId)
+                    }
+                  }}>
+                    <Delete fontSize="small" />
+                  </IconButton>
+                )}
+              </ListItemSecondaryAction>
+            </ListItem>
+          ))}
+        </List>
+          <Box sx={{ p: 2, borderTop: '1px solid', borderColor: 'divider' }}>
+            <Button fullWidth startIcon={<Add />} onClick={() => {
+              const newLayerId = String(Date.now())
+              setLayers(prev => [...prev, { id: newLayerId, name: `Layer ${prev.length + 1}`, visible: true, opacity: 1 }])
+              setActiveLayerId(newLayerId)
+            }}>Add Layer</Button>
+          </Box>
+        <Divider />
+        <Box sx={{ p: 2 }}>
+          <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
+            <Typography variant="subtitle2">Brush Size</Typography>
+            <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 'bold' }}>
+              {size}px
+            </Typography>
+          </Box>
+          <Slider
+            min={1}
+            max={20}
+            value={size}
+            onChange={(_, v) => setSize(v as number)}
+            sx={{
+              height: 6,
+              padding: '12px 0',
+              '& .MuiSlider-rail': {
+                opacity: 0.35,
+                background: 'linear-gradient(90deg, rgba(255,255,255,0.18), rgba(255,255,255,0.06))',
+                backdropFilter: 'blur(6px)',
+                borderRadius: 999
+              },
+              '& .MuiSlider-track': {
+                border: 'none',
+                background: 'linear-gradient(90deg, #00E5FF 0%, #7C4DFF 100%)',
+                boxShadow: '0 4px 14px rgba(124,77,255,0.35)',
+                borderRadius: 999
+              },
+              '& .MuiSlider-thumb': {
+                width: 14,
+                height: 14,
+                backgroundColor: '#fff',
+                border: '1px solid rgba(0,0,0,0.25)',
+                boxShadow: '0 2px 10px rgba(0,0,0,0.35)',
+                backdropFilter: 'blur(4px)',
+                '&:hover, &.Mui-focusVisible': {
+                  boxShadow: '0 0 0 8px rgba(124,77,255,0.16)'
+                },
+                '&::before': { boxShadow: 'none' }
+              }
+            }}
+          />
+          <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mt: 2, mb: 1 }}>
+            <Typography variant="subtitle2">Brush Opacity</Typography>
+            <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 'bold' }}>
+              {Math.round(brushOpacity * 100)}%
+            </Typography>
+          </Box>
+          <Slider
+            min={0.1}
+            max={1}
+            step={0.05}
+            value={brushOpacity}
+            onChange={(_, v) => setBrushOpacity(v as number)}
+            sx={{
+              height: 6,
+              padding: '12px 0',
+              '& .MuiSlider-rail': {
+                opacity: 0.35,
+                background: 'linear-gradient(90deg, rgba(255,255,255,0.18), rgba(255,255,255,0.06))',
+                backdropFilter: 'blur(6px)',
+                borderRadius: 999
+              },
+              '& .MuiSlider-track': {
+                border: 'none',
+                background: 'linear-gradient(90deg, #00C9A7 0%, #6E8EF5 100%)',
+                boxShadow: '0 4px 14px rgba(0,201,167,0.35)',
+                borderRadius: 999
+              },
+              '& .MuiSlider-thumb': {
+                width: 14,
+                height: 14,
+                backgroundColor: '#fff',
+                border: '1px solid rgba(0,0,0,0.25)',
+                boxShadow: '0 2px 10px rgba(0,0,0,0.35)',
+                backdropFilter: 'blur(4px)',
+                '&:hover, &.Mui-focusVisible': {
+                  boxShadow: '0 0 0 8px rgba(0,201,167,0.16)'
+                },
+                '&::before': { boxShadow: 'none' }
+              }
+            }}
+          />
+          <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mt: 2, mb: 1 }}>
+            <Typography variant="subtitle2">Canvas Influence</Typography>
+            <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 'bold' }}>
+              {canvasInfluence}%
+            </Typography>
+          </Box>
+          <Slider
+            min={10}
+            max={100}
+            step={1}
+            value={canvasInfluence}
+            onChange={(_, v) => setCanvasInfluence(v as number)}
+            sx={{
+              height: 6,
+              padding: '12px 0',
+              '& .MuiSlider-rail': {
+                opacity: 0.35,
+                background: 'linear-gradient(90deg, rgba(255,255,255,0.18), rgba(255,255,255,0.06))',
+                backdropFilter: 'blur(6px)',
+                borderRadius: 999
+              },
+              '& .MuiSlider-track': {
+                border: 'none',
+                background: 'linear-gradient(90deg, #FF6B6B 0%, #FFD93D 100%)',
+                boxShadow: '0 4px 14px rgba(255,107,107,0.35)',
+                borderRadius: 999
+              },
+              '& .MuiSlider-thumb': {
+                width: 14,
+                height: 14,
+                backgroundColor: '#fff',
+                border: '1px solid rgba(0,0,0,0.25)',
+                boxShadow: '0 2px 10px rgba(0,0,0,0.35)',
+                backdropFilter: 'blur(4px)',
+                '&:hover, &.Mui-focusVisible': {
+                  boxShadow: '0 0 0 8px rgba(255,107,107,0.16)'
+                },
+                '&::before': { boxShadow: 'none' }
+              }
+            }}
+          />
+          {isApplePencilActive && (
+            <Box sx={{ mt: 2 }}>
+              <Typography variant="subtitle2" sx={{ mb: 1 }}>Pressure</Typography>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                <Box sx={{ 
+                  width: '100%', 
+                  height: 8, 
+                  bgcolor: 'grey.200', 
+                  borderRadius: 1, 
+                  overflow: 'hidden',
+                  position: 'relative'
+                }}>
+                  <Box sx={{ 
+                    width: `${currentPressure * 100}%`, 
+                    height: '100%', 
+                    bgcolor: 'primary.main',
+                    transition: 'width 0.1s ease-out'
+                  }} />
+                </Box>
+                <Typography variant="caption" sx={{ minWidth: '35px', textAlign: 'right' }}>
+                  {Math.round(currentPressure * 100)}%
+                </Typography>
+              </Box>
+            </Box>
+          )}
+          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
+            {isApplePencilActive ? 'Apple Pencil detected - pressure sensitive drawing enabled' : 'Tip: Hold mouse to draw, release to stop.'}
+          </Typography>
+        </Box>
+        <Divider />
+        <Box sx={{ p: 2 }}>
+          <UsageBar usageStatus={usageStatus} onReset={resetUsage} />
+        </Box>
+      </Box>
+
+      {/* Canvas Center */}
+      <Box 
+        data-canvas-container
+        sx={{ 
+          position: 'relative', 
+          overflow: 'hidden', 
+          p: { xs: 1, sm: 2 }, 
+          display: 'flex', 
+          alignItems: 'center', 
+          justifyContent: 'center',
+          bgcolor: 'background.default',
+          height: '100%',
+          minHeight: '500px',
+          cursor: tool === 'brush' ? getBrushCursor(size) : 
+                  tool === 'eraser' ? getEraserCursor(size) : 
+                  'default'
+        }}
+      >
+        {/* Canvas frame */}
+        <Box sx={{ 
+          position: 'relative', 
+          borderRadius: 2, 
+          boxShadow: '0 8px 24px rgba(0,0,0,0.08)', 
+          border: '1px solid', 
+          borderColor: 'divider', 
+          overflow: 'hidden', 
+          backgroundImage: 'radial-gradient(rgba(0,0,0,0.1) 1px, transparent 1px)', 
+          backgroundSize: '24px 24px', 
+          // Force whiteboard to stay white in both light and dark modes
+          bgcolor: '#ffffff',
+          width: '100%',
+          height: '100%',
+          minHeight: '400px',
+          touchAction: 'none', // Prevent default touch behaviors
+          userSelect: 'none', // Prevent text selection
+          WebkitUserSelect: 'none',
+          MozUserSelect: 'none',
+          msUserSelect: 'none'
+        }}>
+        <Stage
+          ref={stageRef}
+          width={canvasSize.width}
+          height={canvasSize.height}
+          onMouseDown={handleMouseDown}
+          onMouseMove={handleMouseMove}
+          onMouseUp={handleMouseUp}
+          onTouchStart={handleTouchStart}
+          onTouchMove={handleTouchMove}
+          onTouchEnd={handleTouchEnd}
+          onClick={(e) => {
+            // Deselect image if clicking on empty space
+            if (e.target === e.target.getStage()) {
+              setSelectedImageId(null)
+              if (transformerRef.current) {
+                transformerRef.current.nodes([])
+                transformerRef.current.getLayer().batchDraw()
+              }
+            }
+          }}
+          onTap={(e) => {
+            // Deselect image if tapping on empty space
+            if (e.target === e.target.getStage()) {
+              setSelectedImageId(null)
+              if (transformerRef.current) {
+                transformerRef.current.nodes([])
+                transformerRef.current.getLayer().batchDraw()
+              }
+            }
+          }}
+          scaleX={zoom}
+          scaleY={zoom}
+        >
+          {/* Render each layer separately */}
+          {layers.map((layer) => (
+            <Layer 
+              key={layer.id} 
+              visible={layer.visible} 
+              opacity={layer.opacity}
+            >
+              {/* Render lines for this layer */}
+              {lines.map((line, i) => {
+                const lineLayerId = lineLayerMap[i]
+                if (lineLayerId !== layer.id) return null
+                
+                return (
+                  <Line
+                    key={i}
+                    points={line.points}
+                    stroke={line.tool === 'eraser' ? '#ffffff' : line.stroke}
+                    strokeWidth={line.strokeWidth}
+                    opacity={line.opacity ?? 1}
+                    tension={0.5}
+                    lineCap="round"
+                    lineJoin="round"
+                    globalCompositeOperation={line.tool === 'eraser' ? 'destination-out' : 'source-over'}
+                  />
+                )
+              })}
+              
+              {/* Render images for this layer */}
+              {uploadedImages.map((image) => {
+                const imageLayerId = imageLayerMap[image.id]
+                if (imageLayerId !== layer.id) return null
+                
+                return (
+                      <Group key={image.id}>
+                        {/* Image with polygon mask if it's a partial selection */}
+                        {image.usePolygonMask && image.selectionPolygon ? (
+                          <Group>
+                            {/* Create a mask using the selection polygon */}
+                            <Line
+                              points={image.selectionPolygon}
+                              fill="black"
+                              closed={true}
+                              globalCompositeOperation="source-in"
+                            />
+                            <KonvaImage
+                              image={imageElements[image.id]}
+                              x={image.x}
+                              y={image.y}
+                              width={image.width}
+                              height={image.height}
+                              rotation={image.rotation}
+                              scaleX={image.scaleX}
+                              scaleY={image.scaleY}
+                              draggable={tool === 'hand'}
+                              listening={tool === 'hand' || (!isDrawing && tool !== 'brush' && tool !== 'eraser')}
+                              onDragEnd={(e) => {
+                                setUploadedImages(prev => 
+                                  prev.map(img => 
+                                    img.id === image.id 
+                                      ? { ...img, x: e.target.x(), y: e.target.y() }
+                                      : img
+                                  )
+                                )
+                              }}
+                              onTransform={(e) => {
+                                const node = e.target
+                                const angle = node.rotation()
+                                // position overlay slightly above the image center
+                                const cx = node.x() + (node.width() * node.scaleX()) / 2
+                                const cy = node.y() - 12
+                                setRotationOverlay({ imageId: image.id, angle, x: cx, y: cy })
+                              }}
+                              onTransformEnd={(e) => {
+                                const node = e.target
+                                const scaleX = node.scaleX()
+                                const scaleY = node.scaleY()
+                                
+                                // Calculate new dimensions maintaining aspect ratio
+                                const newWidth = Math.max(10, node.width() * scaleX)
+                                const newHeight = Math.max(10, node.height() * scaleY)
+                                
+                                setUploadedImages(prev => 
+                                  prev.map(img => 
+                                    img.id === image.id 
+                                      ? { 
+                                          ...img, 
+                                          x: node.x(),
+                                          y: node.y(),
+                                          width: newWidth,
+                                          height: newHeight,
+                                          scaleX: 1,
+                                          scaleY: 1,
+                                          rotation: node.rotation()
+                                        }
+                                      : img
+                                  )
+                                )
+                                
+                                // Reset scale
+                                node.scaleX(1)
+                                node.scaleY(1)
+                                setRotationOverlay(null)
+                              }}
+                              onClick={(e) => {
+                                // Only allow selection with hand tool or when not drawing
+                                if (tool !== 'hand' && (isDrawing || tool === 'brush' || tool === 'eraser')) {
+                                  e.cancelBubble = true
+                                  return
+                                }
+                                setSelectedImageId(image.id)
+                                // Attach transformer to selected image
+                                if (transformerRef.current) {
+                                  transformerRef.current.nodes([e.target])
+                                  transformerRef.current.getLayer().batchDraw()
+                                }
+                              }}
+                              onTap={(e) => {
+                                // Only allow selection with hand tool or when not drawing
+                                if (tool !== 'hand' && (isDrawing || tool === 'brush' || tool === 'eraser')) {
+                                  e.cancelBubble = true
+                                  return
+                                }
+                                setSelectedImageId(image.id)
+                                // Attach transformer to selected image
+                                if (transformerRef.current) {
+                                  transformerRef.current.nodes([e.target])
+                                  transformerRef.current.getLayer().batchDraw()
+                                }
+                              }}
+                              stroke={selectedImageId === image.id ? '#2196f3' : 'transparent'}
+                              strokeWidth={selectedImageId === image.id ? 2 : 0}
+                            />
+                          </Group>
+                        ) : (
+                          /* Regular image without mask */
+                          <KonvaImage
+                            image={imageElements[image.id]}
+                            x={image.x}
+                            y={image.y}
+                            width={image.width}
+                            height={image.height}
+                            rotation={image.rotation}
+                            scaleX={image.scaleX}
+                            scaleY={image.scaleY}
+                            // Handle partial selection cropping
+                            cropX={image.cropX ? image.cropX * (imageElements[image.id]?.width || 0) : 0}
+                            cropY={image.cropY ? image.cropY * (imageElements[image.id]?.height || 0) : 0}
+                            cropWidth={image.cropWidth ? image.cropWidth * (imageElements[image.id]?.width || 0) : imageElements[image.id]?.width || 0}
+                            cropHeight={image.cropHeight ? image.cropHeight * (imageElements[image.id]?.height || 0) : imageElements[image.id]?.height || 0}
+                            draggable={tool === 'hand'}
+                            listening={tool === 'hand' || (!isDrawing && tool !== 'brush' && tool !== 'eraser')}
+                            onDragEnd={(e) => {
+                              setUploadedImages(prev => 
+                                prev.map(img => 
+                                  img.id === image.id 
+                                    ? { ...img, x: e.target.x(), y: e.target.y() }
+                                    : img
+                                )
+                              )
+                            }}
+                            onTransform={(e) => {
+                              const node = e.target
+                              const angle = node.rotation()
+                              const cx = node.x() + (node.width() * node.scaleX()) / 2
+                              const cy = node.y() - 12
+                              setRotationOverlay({ imageId: image.id, angle, x: cx, y: cy })
+                            }}
+                            onTransformEnd={(e) => {
+                              const node = e.target
+                              const scaleX = node.scaleX()
+                              const scaleY = node.scaleY()
+                              
+                              // Calculate new dimensions maintaining aspect ratio
+                              const newWidth = Math.max(10, node.width() * scaleX)
+                              const newHeight = Math.max(10, node.height() * scaleY)
+                              
+                              setUploadedImages(prev => 
+                                prev.map(img => 
+                                  img.id === image.id 
+                                    ? { 
+                                        ...img, 
+                                        x: node.x(),
+                                        y: node.y(),
+                                        width: newWidth,
+                                        height: newHeight,
+                                        scaleX: 1,
+                                        scaleY: 1,
+                                        rotation: node.rotation()
+                                      }
+                                    : img
+                                )
+                              )
+                              
+                              // Reset scale
+                              node.scaleX(1)
+                              node.scaleY(1)
+                              setRotationOverlay(null)
+                            }}
+                            onClick={(e) => {
+                              // Only allow selection with hand tool or when not drawing
+                              if (tool !== 'hand' && (isDrawing || tool === 'brush' || tool === 'eraser')) {
+                                e.cancelBubble = true
+                                return
+                              }
+                              setSelectedImageId(image.id)
+                              // Attach transformer to selected image
+                              if (transformerRef.current) {
+                                transformerRef.current.nodes([e.target])
+                                transformerRef.current.getLayer().batchDraw()
+                              }
+                            }}
+                            onTap={(e) => {
+                              // Only allow selection with hand tool or when not drawing
+                              if (tool !== 'hand' && (isDrawing || tool === 'brush' || tool === 'eraser')) {
+                                e.cancelBubble = true
+                                return
+                              }
+                              setSelectedImageId(image.id)
+                              // Attach transformer to selected image
+                              if (transformerRef.current) {
+                                transformerRef.current.nodes([e.target])
+                                transformerRef.current.getLayer().batchDraw()
+                              }
+                            }}
+                            stroke={selectedImageId === image.id ? '#2196f3' : 'transparent'}
+                            strokeWidth={selectedImageId === image.id ? 2 : 0}
+                          />
+                        )}
+
+                        {/* Rotation overlay for this image, only show when this image is being transformed */}
+                        {rotationOverlay && rotationOverlay.imageId === image.id && (
+                          <Group>
+                            <Text
+                              x={rotationOverlay.x}
+                              y={rotationOverlay.y}
+                              text={`${Math.round((rotationOverlay.angle % 360 + 360) % 360)}°`}
+                              fontSize={12}
+                              fill="#fff"
+                              align="center"
+                              offsetX={8}
+                              padding={4}
+                              shadowColor="rgba(0,0,0,0.5)"
+                              shadowBlur={4}
+                              shadowOffset={{ x: 0, y: 1 }}
+                              shadowOpacity={0.6}
+                            />
+                          </Group>
+                        )}
+                      </Group>
+                    )
+                  })}
+              {/* Selection path visualization - only on the first layer to avoid duplication */}
+              {layer.id === layers[0]?.id && selectionPath.length > 0 && selectionMode && (
+                <Group>
+                  {/* Dark overlay covering entire canvas */}
+                  <Rect
+                    x={0}
+                    y={0}
+                    width={canvasSize.width}
+                    height={canvasSize.height}
+                    fill="rgba(0, 0, 0, 0.3)"
+                  />
+                  {/* Clear area for selection */}
+                  <Line
+                    points={selectionPath}
+                    fill="transparent"
+                    closed={true}
+                    globalCompositeOperation="destination-out"
+                  />
+                  {/* Selection border */}
+                  <Line
+                    points={selectionPath}
+                    stroke="#2196f3"
+                    strokeWidth={2}
+                    fill="rgba(33, 150, 243, 0.1)"
+                    closed={true}
+                    dash={[5, 5]}
+                  />
+                </Group>
+              )}
+              
+              {/* Crop area visualization - only on the layer containing the selected image */}
+              {cropArea && cropMode && selectedImageId && (() => {
+                const selectedImage = uploadedImages.find(img => img.id === selectedImageId)
+                if (!selectedImage) return null
+                
+                const imageLayerId = imageLayerMap[selectedImage.id]
+                if (imageLayerId !== layer.id) return null
+                
+                return (
+                  <Group>
+                    {/* Dark overlay outside crop area */}
+                    <Rect
+                      x={selectedImage.x}
+                      y={selectedImage.y}
+                      width={selectedImage.width}
+                      height={selectedImage.height}
+                      fill="rgba(0, 0, 0, 0.3)"
+                      globalCompositeOperation="source-over"
+                    />
+                    {/* Clear area for crop selection */}
+                    <Rect
+                      x={cropArea.x}
+                      y={cropArea.y}
+                      width={cropArea.width}
+                      height={cropArea.height}
+                      fill="transparent"
+                      globalCompositeOperation="destination-out"
+                    />
+                    {/* Crop area rectangle */}
+                    <Rect
+                      x={cropArea.x}
+                      y={cropArea.y}
+                      width={cropArea.width}
+                      height={cropArea.height}
+                      stroke="#ff9800"
+                      strokeWidth={2}
+                      fill="rgba(255, 152, 0, 0.1)"
+                      dash={[5, 5]}
+                    />
+                    {/* Crop handles */}
+                    <Rect
+                      x={cropArea.x - 4}
+                      y={cropArea.y - 4}
+                      width={8}
+                      height={8}
+                      fill="#ff9800"
+                      stroke="#ffffff"
+                      strokeWidth={1}
+                    />
+                    <Rect
+                      x={cropArea.x + cropArea.width - 4}
+                      y={cropArea.y - 4}
+                      width={8}
+                      height={8}
+                      fill="#ff9800"
+                      stroke="#ffffff"
+                      strokeWidth={1}
+                    />
+                    <Rect
+                      x={cropArea.x - 4}
+                      y={cropArea.y + cropArea.height - 4}
+                      width={8}
+                      height={8}
+                      fill="#ff9800"
+                      stroke="#ffffff"
+                      strokeWidth={1}
+                    />
+                    <Rect
+                      x={cropArea.x + cropArea.width - 4}
+                      y={cropArea.y + cropArea.height - 4}
+                      width={8}
+                      height={8}
+                      fill="#ff9800"
+                      stroke="#ffffff"
+                      strokeWidth={1}
+                    />
+                  </Group>
+                )
+              })()}
+              
+              {/* Transformer for selected image - only show if selected image is on this layer */}
+              {selectedImageId && (() => {
+                const selectedImage = uploadedImages.find(img => img.id === selectedImageId)
+                const imageLayerId = selectedImage ? imageLayerMap[selectedImage.id] : null
+                if (imageLayerId !== layer.id) return null
+                
+                return (
+                  <Transformer
+                    ref={transformerRef}
+                    boundBoxFunc={(oldBox, newBox) => {
+                      // Maintain aspect ratio
+                      if (Math.abs(newBox.width) < 5 || Math.abs(newBox.height) < 5) {
+                        return oldBox
+                      }
+                      return newBox
+                    }}
+                    keepRatio={true}
+                    enabledAnchors={['top-left', 'top-right', 'bottom-left', 'bottom-right']}
+                    rotateEnabled={true}
+                    borderEnabled={true}
+                    borderStroke="#2196f3"
+                    borderStrokeWidth={2}
+                    anchorStroke="#2196f3"
+                    anchorFill="#ffffff"
+                    anchorSize={8}
+                  />
+                )
+              })()}
+                </Layer>
+              ))}
+        </Stage>
+        </Box>
+
+        {/* Floating top toolbar */}
+        <Box 
+          onMouseDown={handleToolbarMouseDown}
+          onTouchStart={handleToolbarTouchStart}
+          sx={{ 
+            position: 'absolute', 
+            top: toolbarPosition.y, 
+            left: toolbarPosition.x, 
+            bgcolor: 'background.paper', 
+            border: '1px solid', 
+            borderColor: 'divider', 
+            borderRadius: 999, 
+            boxShadow: '0 6px 18px rgba(0,0,0,0.08)', 
+            px: 1, 
+            py: 0.5, 
+            display: 'flex', 
+            alignItems: 'center', 
+            gap: 0.5,
+            cursor: isDragging ? 'grabbing' : 'grab',
+            userSelect: 'none',
+            transition: isDragging ? 'none' : 'all 0.2s ease-out',
+            '&:hover': {
+              boxShadow: '0 8px 24px rgba(0,0,0,0.12)',
+              transform: isDragging ? 'none' : 'translateY(-1px)',
+            }
+          }}
+        >
+          <Tooltip title="Undo (Cmd+Z / Ctrl+Z)"><span><IconButton size="small" onClick={(e) => { e.stopPropagation(); e.preventDefault(); console.log('Undo button clicked'); undo(); }} disabled={historyIndex <= 0}><Undo fontSize="small" /></IconButton></span></Tooltip>
+          <Tooltip title="Redo (Cmd+Shift+Z / Ctrl+Y)"><span><IconButton size="small" onClick={(e) => { e.stopPropagation(); redo(); }} disabled={historyIndex >= history.length - 1}><Redo fontSize="small" /></IconButton></span></Tooltip>
+          <Divider orientation="vertical" flexItem sx={{ mx: 0.5 }} />
+          <Tooltip title="Zoom Out"><span><IconButton size="small" onClick={(e) => { e.stopPropagation(); setZoom(z => Math.max(minZoom, +(z - 0.1).toFixed(2))); }}><ZoomOut fontSize="small" /></IconButton></span></Tooltip>
+          <Typography variant="caption" sx={{ minWidth: 40, textAlign: 'center' }}>{Math.round(zoom * 100)}%</Typography>
+          <Tooltip title="Zoom In"><span><IconButton size="small" onClick={(e) => { e.stopPropagation(); setZoom(z => Math.min(maxZoom, +(z + 0.1).toFixed(2))); }}><ZoomIn fontSize="small" /></IconButton></span></Tooltip>
+          <Divider orientation="vertical" flexItem sx={{ mx: 0.5 }} />
+          <ToggleButtonGroup exclusive size="small" value={tool} onChange={(_, v) => v && setTool(v)} onClick={(e) => e.stopPropagation()}>
+            <ToggleButton value="brush"><Gesture fontSize="small" /></ToggleButton>
+            <ToggleButton value="eraser"><Colorize fontSize="small" /></ToggleButton>
+            <ToggleButton value="hand" disabled={uploadedImages.length === 0}><PanToolAlt fontSize="small" /></ToggleButton>
+          </ToggleButtonGroup>
+          <Divider orientation="vertical" flexItem sx={{ mx: 0.5 }} />
+          <Tooltip title="Brush Color"><span>
+            <IconButton 
+              size="small" 
+              onClick={(e) => e.stopPropagation()}
+              sx={{ 
+                width: 32, 
+                height: 32, 
+                borderRadius: '50%', 
+                border: '2px solid', 
+                borderColor: 'divider',
+                bgcolor: color,
+                '&:hover': {
+                  borderColor: 'primary.main',
+                  transform: 'scale(1.05)',
+                  transition: 'all 0.2s ease-out'
+                }
+              }}
+            >
+              <input
+                type="color"
+                value={color}
+                onChange={(e) => setColor(e.target.value)}
+                style={{
+                  position: 'absolute',
+                  opacity: 0,
+                  width: '100%',
+                  height: '100%',
+                  cursor: 'pointer',
+                  border: 'none',
+                  borderRadius: '50%'
+                }}
+              />
+            </IconButton>
+          </span></Tooltip>
+          <Divider orientation="vertical" flexItem sx={{ mx: 0.5 }} />
+          <Tooltip title="Aura Assist"><span><IconButton size="small" color="primary" onClick={(e) => e.stopPropagation()}><AutoFixHigh fontSize="small" /></IconButton></span></Tooltip>
+          <Divider orientation="vertical" flexItem sx={{ mx: 0.5 }} />
+          <Tooltip title="Select Area"><span><IconButton size="small" color="info" onClick={(e) => { e.stopPropagation(); startSelectionMode(); }} sx={{ bgcolor: selectionMode ? 'info.dark' : 'info.main', color: 'white', '&:hover': { bgcolor: 'info.dark' } }}><ContentCut fontSize="small" /></IconButton></span></Tooltip>
+          {selectedImageId && !cropMode && !selectionMode && (
+            <>
+              <Divider orientation="vertical" flexItem sx={{ mx: 0.5 }} />
+              <Tooltip title="Replicate Image"><span><IconButton size="small" color="secondary" onClick={(e) => { e.stopPropagation(); replicateSelectedImage(); }}><ContentCopy fontSize="small" /></IconButton></span></Tooltip>
+              <Tooltip title="Crop Image"><span><IconButton size="small" color="warning" onClick={(e) => { e.stopPropagation(); cropSelectedImage(); }}><Crop fontSize="small" /></IconButton></span></Tooltip>
+            </>
+          )}
+          {cropMode && (
+            <>
+              <Divider orientation="vertical" flexItem sx={{ mx: 0.5 }} />
+              <Tooltip title="Apply Crop"><span><IconButton size="small" color="success" onClick={(e) => { e.stopPropagation(); applyCrop(); }} sx={{ bgcolor: 'success.main', color: 'white', '&:hover': { bgcolor: 'success.dark' } }}>✓</IconButton></span></Tooltip>
+              <Tooltip title="Cancel Crop"><span><IconButton size="small" color="error" onClick={(e) => { e.stopPropagation(); cancelCrop(); }} sx={{ bgcolor: 'error.main', color: 'white', '&:hover': { bgcolor: 'error.dark' } }}>✕</IconButton></span></Tooltip>
+            </>
+          )}
+          {selectionMode && (
+            <>
+              <Divider orientation="vertical" flexItem sx={{ mx: 0.5 }} />
+              <Tooltip title="Apply Selection"><span><IconButton size="small" color="success" onClick={(e) => { e.stopPropagation(); applySelection(); }} sx={{ bgcolor: 'success.main', color: 'white', '&:hover': { bgcolor: 'success.dark' } }}>✓</IconButton></span></Tooltip>
+              <Tooltip title="Cancel Selection"><span><IconButton size="small" color="error" onClick={(e) => { e.stopPropagation(); cancelSelection(); }} sx={{ bgcolor: 'error.main', color: 'white', '&:hover': { bgcolor: 'error.dark' } }}>✕</IconButton></span></Tooltip>
+            </>
+          )}
+        </Box>
+      </Box>
+
+      {/* Right Sidebar */}
+      <Box sx={{ display: { xs: 'none', md: 'flex' }, flexDirection: 'column', borderLeft: '1px solid', borderColor: 'divider' }}>
+        {/* Tab Navigation */}
+        <Box sx={{ display: 'flex', borderBottom: '1px solid', borderColor: 'divider' }}>
+          <Button
+            variant={rightSidebarTab === 'jewellery' ? 'contained' : 'text'}
+            onClick={() => setRightSidebarTab('jewellery')}
+            sx={{
+              flex: 1,
+              borderRadius: 0,
+              textTransform: 'none',
+              fontWeight: 'bold',
+              fontSize: '0.875rem',
+              py: 1.5,
+              ...(rightSidebarTab === 'jewellery' ? {
+                bgcolor: 'primary.main',
+                color: 'white',
+                '&:hover': { bgcolor: 'primary.dark' }
+              } : {
+                color: 'text.secondary',
+                '&:hover': { bgcolor: 'action.hover' }
+              })
+            }}
+          >
+            Jewellery Controls
+          </Button>
+          <Button
+            variant={rightSidebarTab === 'more' ? 'contained' : 'text'}
+            onClick={() => setRightSidebarTab('more')}
+            sx={{
+              flex: 1,
+              borderRadius: 0,
+              textTransform: 'none',
+              fontWeight: 'bold',
+              fontSize: '0.875rem',
+              py: 1.5,
+              ...(rightSidebarTab === 'more' ? {
+                bgcolor: 'primary.main',
+                color: 'white',
+                '&:hover': { bgcolor: 'primary.dark' }
+              } : {
+                color: 'text.secondary',
+                '&:hover': { bgcolor: 'action.hover' }
+              })
+            }}
+          >
+            More
+          </Button>
+        </Box>
+
+        {/* Tab Content */}
+        {rightSidebarTab === 'jewellery' && (
+          <Box sx={{ p: 1.5, display: 'grid', gap: 1.25 }}>
+            <Typography variant="subtitle2" sx={{ fontWeight: 'bold' }}>Jewellery Controls</Typography>
+            <ButtonGroup size="small" orientation="vertical" variant="outlined" sx={{ gap: 1 }}>
+            <Button 
+              variant="contained" 
+              onClick={() => {
+                const result = trackUsage('generate')
+                if (result.allowed > 0) {
+                  console.log('Generate Jewellery clicked - Usage tracked')
+                  // TODO: Implement actual AI generation
+                } else {
+                  console.log('Generate Jewellery blocked - Usage limit reached')
+                }
+              }}
+              sx={{
+                background: 'linear-gradient(135deg, #2c3e50 0%, #000000 100%)',
+                border: 'none',
+                borderRadius: 3,
+                textTransform: 'none',
+                fontWeight: 600,
+                fontSize: '0.875rem',
+                py: 1.5,
+                boxShadow: '0 8px 32px rgba(0, 0, 0, 0.3)',
+                position: 'relative',
+                overflow: 'hidden',
+                '&:hover': {
+                  background: 'linear-gradient(135deg, #1a252f 0%, #000000 100%)',
+                  boxShadow: '0 12px 40px rgba(0, 0, 0, 0.4)',
+                  transform: 'translateY(-2px)',
+                  transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+                },
+                '&:active': {
+                  transform: 'translateY(0px)',
+                  boxShadow: '0 4px 20px rgba(0, 0, 0, 0.3)',
+                },
+                '&::before': {
+                  content: '""',
+                  position: 'absolute',
+                  top: 0,
+                  left: '-100%',
+                  width: '100%',
+                  height: '100%',
+                  background: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.2), transparent)',
+                  transition: 'left 0.5s',
+                },
+                '&:hover::before': {
+                  left: '100%',
+                }
+              }}
+            >
+              Generate Jewellery
+            </Button>
+            <Button 
+              onClick={() => {
+                const result = trackUsage('harmonize')
+                if (result.allowed > 0) {
+                  console.log('Harmonize clicked - Usage tracked')
+                  // TODO: Implement actual harmonization
+                } else {
+                  console.log('Harmonize blocked - Usage limit reached')
+                }
+              }}
+              sx={{
+                background: 'linear-gradient(135deg, rgba(255,255,255,0.1) 0%, rgba(255,255,255,0.05) 100%)',
+                backdropFilter: 'blur(10px)',
+                border: '1px solid rgba(0,0,0,0.1)',
+                borderRadius: 3,
+                textTransform: 'none',
+                fontWeight: 600,
+                fontSize: '0.875rem',
+                py: 1.5,
+                color: 'text.primary',
+                boxShadow: '0 8px 32px rgba(0,0,0,0.1)',
+                position: 'relative',
+                overflow: 'hidden',
+                '&:hover': {
+                  background: 'linear-gradient(135deg, rgba(255,255,255,0.2) 0%, rgba(255,255,255,0.1) 100%)',
+                  border: '1px solid rgba(0,0,0,0.15)',
+                  boxShadow: '0 12px 40px rgba(0,0,0,0.15)',
+                  transform: 'translateY(-2px)',
+                  transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+                },
+                '&:active': {
+                  transform: 'translateY(0px)',
+                  boxShadow: '0 4px 20px rgba(0,0,0,0.1)',
+                },
+                '&::before': {
+                  content: '""',
+                  position: 'absolute',
+                  top: 0,
+                  left: '-100%',
+                  width: '100%',
+                  height: '100%',
+                  background: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.1), transparent)',
+                  transition: 'left 0.5s',
+                },
+                '&:hover::before': {
+                  left: '100%',
+                }
+              }}
+              >
+                Harmonize
+              </Button>
+          </ButtonGroup>
+            <Divider />
+            <Box sx={{ p: 1.5, display: 'grid', gap: 1 }}>
+              <Typography variant="subtitle2" sx={{ fontWeight: 'bold' }}>Stone Settings</Typography>
+              <Box sx={{ display: 'flex', gap: 1, justifyContent: 'space-between' }}>
+                <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 0.5 }}>
+              <Typography variant="caption" sx={{ fontSize: '0.7rem', color: 'text.secondary', fontWeight: 'bold' }}>Primary</Typography>
+              <StoneGrid selected={primaryStone} onOpen={(e) => { setStoneAnchor(e.currentTarget); setStoneType('primary') }} label={findStoneDetails(primaryStone).label} icon={findStoneDetails(primaryStone).icon} type="primary" />
+            </Box>
+            <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 0.5 }}>
+              <Typography variant="caption" sx={{ fontSize: '0.7rem', color: 'text.secondary', fontWeight: 'bold' }}>Secondary</Typography>
+              <StoneGrid selected={secondaryStone || ''} onOpen={(e) => { setStoneAnchor(e.currentTarget); setStoneType('secondary') }} label={secondaryStone ? findStoneDetails(secondaryStone).label : 'None'} icon={secondaryStone ? findStoneDetails(secondaryStone).icon : ''} type="secondary" />
+            </Box>
+            <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 0.5 }}>
+              <Typography variant="caption" sx={{ fontSize: '0.7rem', color: 'text.secondary', fontWeight: 'bold' }}>Metal</Typography>
+              <MetalGrid selected={metal} onOpen={(e) => setMetalAnchor(e.currentTarget)} label={METALS.find(m => m.key === metal)?.label || ''} />
+            </Box>
+          </Box>
+          <Divider sx={{ my: 1 }} />
+          <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+            <Button 
+              component="label"
+              variant="contained"
+              startIcon={
+                <Box sx={{
+                  width: 16,
+                  height: 16,
+                  borderRadius: '50%',
+                  background: 'linear-gradient(135deg, #4caf50 0%, #2e7d32 100%)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  boxShadow: '0 1px 4px rgba(0,0,0,0.1)',
+                  '&::before': {
+                    content: '""',
+                    width: 6,
+                    height: 6,
+                    borderRadius: '50%',
+                    background: 'linear-gradient(135deg, #ffffff 0%, #f8f8f8 100%)',
+                    boxShadow: '0 1px 2px rgba(0,0,0,0.1)'
+                  }
+                }} />
+              }
+              sx={(theme) => ({
+                flex: 1,
+                borderRadius: 2,
+                textTransform: 'none',
+                fontWeight: 600,
+                fontSize: '0.8rem',
+                py: 1.25,
+                px: 2,
+                position: 'relative',
+                overflow: 'hidden',
+                transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+                ...(theme.palette.mode === 'dark'
+                  ? {
+                      backgroundColor: '#000',
+                      color: '#fff',
+                      border: '1px solid rgba(255,255,255,0.2)',
+                      boxShadow: '0 4px 16px rgba(0,0,0,0.6)',
+                      '&:hover': {
+                        backgroundColor: '#111',
+                        boxShadow: '0 6px 20px rgba(0,0,0,0.7)'
+                      }
+                    }
+                  : {
+                      background: 'linear-gradient(135deg, #ffffff 0%, #f8f8f8 100%)',
+                      border: '1px solid rgba(0,0,0,0.1)',
+                      color: 'text.primary',
+                      boxShadow: '0 4px 16px rgba(0,0,0,0.08), 0 1px 4px rgba(0,0,0,0.05)',
+                      '&:hover': {
+                        background: 'linear-gradient(135deg, #f8f8f8 0%, #f0f0f0 100%)',
+                        boxShadow: '0 6px 20px rgba(0,0,0,0.12), 0 2px 6px rgba(0,0,0,0.08)',
+                        transform: 'translateY(-1px)',
+                        border: '1px solid rgba(0,0,0,0.15)',
+                      },
+                    }),
+                '&:active': {
+                  transform: 'translateY(0px)'
+                },
+                '&::before': {
+                  content: '""',
+                  position: 'absolute',
+                  top: 0,
+                  left: '-100%',
+                  width: '100%',
+                  height: '100%',
+                  background: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.1), transparent)',
+                  transition: 'left 0.6s ease-out',
+                },
+                '&:hover::before': {
+                  left: '100%',
+                },
+                '&::after': {
+                  content: '""',
+                  position: 'absolute',
+                  top: '50%',
+                  left: '50%',
+                  width: 0,
+                  height: 0,
+                  borderRadius: '50%',
+                  background: 'rgba(255,255,255,0.08)',
+                  transform: 'translate(-50%, -50%)',
+                  transition: 'width 0.6s ease-out, height 0.6s ease-out',
+                },
+                '&:active::after': {
+                  width: '200px',
+                  height: '200px',
+                }
+              })}
+            >
+              <input
+                type="file"
+                accept="image/*"
+                onChange={handleImageUpload}
+                style={{ display: 'none' }}
+              />
+              Upload Sketch
+            </Button>
+            <Tooltip title="Generate Ad">
+              <IconButton
+                onClick={() => {
+                  console.log('Generate Ad clicked')
+                  // TODO: Implement ad generation functionality
+                }}
+                sx={{
+                  width: 40,
+                  height: 40,
+                  background: 'linear-gradient(135deg, #2196f3 0%, #1976d2 100%)',
+                  color: 'white',
+                  borderRadius: 2,
+                  boxShadow: '0 4px 12px rgba(33, 150, 243, 0.3), 0 1px 3px rgba(0,0,0,0.1)',
+                  transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+                  '&:hover': {
+                    background: 'linear-gradient(135deg, #1976d2 0%, #1565c0 100%)',
+                    boxShadow: '0 6px 16px rgba(33, 150, 243, 0.4), 0 2px 4px rgba(0,0,0,0.12)',
+                    transform: 'translateY(-1px)',
+                  },
+                  '&:active': {
+                    transform: 'translateY(0px)',
+                    boxShadow: '0 3px 8px rgba(33, 150, 243, 0.3), 0 1px 2px rgba(0,0,0,0.1)',
+                  },
+                  '&::before': {
+                    content: '""',
+                    position: 'absolute',
+                    top: 0,
+                    left: '-100%',
+                    width: '100%',
+                    height: '100%',
+                    background: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.2), transparent)',
+                    transition: 'left 0.5s',
+                  },
+                  '&:hover::before': {
+                    left: '100%',
+                  }
+                }}
+              >
+                <Campaign sx={{ fontSize: '1.1rem' }} />
+              </IconButton>
+            </Tooltip>
+            <Tooltip title="Remove Selected Image (Delete/Backspace)">
+              <IconButton
+                onClick={removeSelectedImage}
+                disabled={!selectedImageId}
+                sx={{
+                  color: 'error.main',
+                  opacity: selectedImageId ? 1 : 0.3,
+                  transition: 'all 0.2s ease-out',
+                  '&:hover': {
+                    backgroundColor: 'error.light',
+                    color: 'white',
+                    transform: 'scale(1.05)',
+                  },
+                  '&:disabled': {
+                    opacity: 0.3,
+                    cursor: 'not-allowed',
+                  }
+                }}
+              >
+                <Close sx={{ fontSize: '1.1rem' }} />
+              </IconButton>
+            </Tooltip>
+          </Box>
+          <Divider sx={{ my: 1 }} />
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+            <Typography variant="subtitle2" sx={{ fontWeight: 'bold', fontSize: '0.8rem' }}>Context</Typography>
+            <TextField
+              multiline
+              rows={3}
+              value={contextText}
+              onChange={(e) => setContextText(e.target.value)}
+              placeholder="Describe your jewelry design context, inspiration, or specific requirements..."
+              variant="outlined"
+              size="small"
+              sx={(theme) => ({
+                '& .MuiOutlinedInput-root': {
+                  fontSize: '0.8rem',
+                  '& fieldset': {
+                    borderColor: theme.palette.mode === 'dark' ? 'rgba(255,255,255,0.3)' : 'rgba(0,0,0,0.1)'
+                  },
+                  '&:hover fieldset': {
+                    borderColor: theme.palette.mode === 'dark' ? 'rgba(255,255,255,0.5)' : 'rgba(0,0,0,0.2)'
+                  },
+                  '&.Mui-focused fieldset': {
+                    borderColor: theme.palette.mode === 'dark' ? '#ffffff' : theme.palette.primary.main
+                  }
+                }
+              })}
+            />
+            <Button
+              fullWidth
+              variant="contained"
+              onClick={() => {
+                console.log('Generate with context:', contextText)
+                // TODO: Implement generation with context
+              }}
+              sx={(theme) => ({
+                borderRadius: 2,
+                textTransform: 'none',
+                fontWeight: 600,
+                fontSize: '0.8rem',
+                py: 1.25,
+                position: 'relative',
+                overflow: 'hidden',
+                ...(theme.palette.mode === 'dark'
+                  ? {
+                      backgroundColor: '#000',
+                      color: '#fff',
+                      border: '1px solid rgba(255,255,255,0.2)',
+                      boxShadow: '0 4px 16px rgba(0,0,0,0.6)',
+                      '&:hover': {
+                        backgroundColor: '#111',
+                        boxShadow: '0 6px 20px rgba(0,0,0,0.7)'
+                      }
+                    }
+                  : {
+                      background: 'linear-gradient(135deg, #ffffff 0%, #f8f8f8 100%)',
+                      border: '1px solid rgba(0,0,0,0.1)',
+                      color: 'text.primary',
+                      boxShadow: '0 4px 16px rgba(0,0,0,0.08), 0 1px 4px rgba(0,0,0,0.05)',
+                      '&:hover': {
+                        background: 'linear-gradient(135deg, #f8f8f8 0%, #f0f0f0 100%)',
+                        boxShadow: '0 6px 20px rgba(0,0,0,0.12), 0 2px 6px rgba(0,0,0,0.08)',
+                        transform: 'translateY(-1px)',
+                        border: '1px solid rgba(0,0,0,0.15)',
+                      },
+                    }),
+                '&:active': {
+                  transform: 'translateY(0px)'
+                },
+                '&::before': {
+                  content: '""',
+                  position: 'absolute',
+                  top: 0,
+                  left: '-100%',
+                  width: '100%',
+                  height: '100%',
+                  background: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.1), transparent)',
+                  transition: 'left 0.6s ease-out',
+                },
+                '&:hover::before': {
+                  left: '100%',
+                },
+                '&::after': {
+                  content: '""',
+                  position: 'absolute',
+                  top: '50%',
+                  left: '50%',
+                  width: 0,
+                  height: 0,
+                  borderRadius: '50%',
+                  background: 'rgba(255,255,255,0.08)',
+                  transform: 'translate(-50%, -50%)',
+                  transition: 'width 0.6s ease-out, height 0.6s ease-out',
+                },
+                '&:active::after': {
+                  width: '200px',
+                  height: '200px',
+                }
+              })}
+            >
+              Generate
+            </Button>
+          </Box>
+        </Box>
+        )}
+
+        {rightSidebarTab === 'more' && (
+          <Box sx={{ p: 1.5, display: 'grid', gap: 1.25 }}>
+            <Typography variant="subtitle2" sx={{ fontWeight: 'bold' }}>More Options</Typography>
+            <Typography variant="body2" color="text.secondary" sx={{ textAlign: 'center', py: 2 }}>
+              Additional options will be added here
+            </Typography>
+          </Box>
+        )}
+
+        <Menu anchorEl={stoneAnchor} open={Boolean(stoneAnchor)} onClose={() => setStoneAnchor(null)}>
+          {STONES.map(s => (
+            <MenuItem 
+              key={s.key} 
+              onClick={() => { 
+                if (s.hasSubmenu) {
+                  setSapphireSubmenuAnchor(stoneAnchor)
+                } else {
+                  stoneType === 'primary' ? setPrimaryStone(s.key) : setSecondaryStone(s.key); 
+                  setStoneAnchor(null)
+                }
+              }}
+            >
+              {s.label}
+              {s.hasSubmenu && <span style={{ fontSize: '0.7em', marginLeft: '8px' }}>▶</span>}
+            </MenuItem>
+          ))}
+        </Menu>
+
+        <Menu 
+          anchorEl={sapphireSubmenuAnchor} 
+          open={Boolean(sapphireSubmenuAnchor)} 
+          onClose={() => setSapphireSubmenuAnchor(null)}
+          anchorOrigin={{ vertical: 'top', horizontal: 'right' }}
+          transformOrigin={{ vertical: 'top', horizontal: 'left' }}
+        >
+          {SAPPHIRE_VARIANTS.map(s => (
+            <MenuItem 
+              key={s.key} 
+              onClick={() => { 
+                stoneType === 'primary' ? setPrimaryStone(s.key) : setSecondaryStone(s.key); 
+                setSapphireSubmenuAnchor(null)
+                setStoneAnchor(null)
+              }}
+            >
+              {s.label}
+            </MenuItem>
+          ))}
+        </Menu>
+
+        <Menu anchorEl={metalAnchor} open={Boolean(metalAnchor)} onClose={() => setMetalAnchor(null)}>
+          {METALS.map(m => (
+            <MenuItem key={m.key} onClick={() => { setMetal(m.key); setMetalAnchor(null) }}>{m.label}</MenuItem>
+          ))}
+        </Menu>
+        
+      </Box>
+
+      {/* Mobile Left Drawer */}
+      <Drawer 
+        anchor="left" 
+        open={leftDrawerOpen} 
+        onClose={() => setLeftDrawerOpen(false)}
+        sx={{ display: { xs: 'block', md: 'none' } }}
+      >
+        <Box sx={{ width: 260, height: '100%', display: 'flex', flexDirection: 'column' }}>
+          <Box sx={{ p: 2 }}>
+            <Typography variant="subtitle2" sx={{ fontWeight: 'bold' }}>Layers</Typography>
+          </Box>
+          <List dense sx={{ flex: 1, overflowY: 'auto', px: 1 }}>
+            {layers.map(l => (
+                    <ListItem key={l.id} onClick={() => {
+                      console.log('Mobile: Switching to layer:', l.id)
+                      setActiveLayerId(l.id)
+                    }} sx={{ cursor: 'pointer', border: '1px solid rgba(0,0,0,0.08)', borderRadius: 1, mb: 0.5, backgroundColor: l.id === activeLayerId ? 'action.selected' : 'transparent' }}>
+                <ListItemText primary={l.name} />
+                <ListItemSecondaryAction>
+                  <IconButton edge="end" size="small" onClick={() => {
+                    console.log('Mobile: Toggling visibility for layer:', l.id, 'Current visible:', l.visible)
+                    setLayers(prev => prev.map(x => x.id === l.id ? { ...x, visible: !x.visible } : x))
+                  }}>
+                    {l.visible ? <Visibility fontSize="small" /> : <VisibilityOff fontSize="small" />}
+                  </IconButton>
+                  {layers.length > 1 && (
+                    <IconButton edge="end" size="small" onClick={() => {
+                      // Delete layer and clean up mappings
+                      setLayers(prev => prev.filter(x => x.id !== l.id))
+                      // Move content from deleted layer to the first remaining layer
+                      const remainingLayers = layers.filter(x => x.id !== l.id)
+                      if (remainingLayers.length > 0) {
+                        const targetLayerId = remainingLayers[0].id
+                        setLineLayerMap(prev => {
+                          const newMap = { ...prev }
+                          Object.keys(newMap).forEach(key => {
+                            const numKey = parseInt(key)
+                            if (newMap[numKey] === l.id) {
+                              newMap[numKey] = targetLayerId
+                            }
+                          })
+                          return newMap
+                        })
+                        setImageLayerMap(prev => {
+                          const newMap = { ...prev }
+                          Object.keys(newMap).forEach(key => {
+                            if (newMap[key] === l.id) {
+                              newMap[key] = targetLayerId
+                            }
+                          })
+                          return newMap
+                        })
+                        // Set active layer to the target layer
+                        setActiveLayerId(targetLayerId)
+                      }
+                    }}>
+                      <Delete fontSize="small" />
+                    </IconButton>
+                  )}
+                </ListItemSecondaryAction>
+              </ListItem>
+            ))}
+          </List>
+          <Box sx={{ p: 2, borderTop: '1px solid', borderColor: 'divider' }}>
+            <Button fullWidth startIcon={<Add />} onClick={() => {
+              const newLayerId = String(Date.now())
+              setLayers(prev => [...prev, { id: newLayerId, name: `Layer ${prev.length + 1}`, visible: true, opacity: 1 }])
+              setActiveLayerId(newLayerId)
+            }}>Add Layer</Button>
+          </Box>
+          <Divider />
+          <Box sx={{ p: 2 }}>
+            <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
+              <Typography variant="subtitle2">Brush Size</Typography>
+              <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 'bold' }}>
+                {size}px
+              </Typography>
+            </Box>
+            <Slider
+              min={1}
+              max={20}
+              value={size}
+              onChange={(_, v) => setSize(v as number)}
+              sx={{
+                height: 6,
+                padding: '12px 0',
+                '& .MuiSlider-rail': {
+                  opacity: 0.35,
+                  background: 'linear-gradient(90deg, rgba(255,255,255,0.18), rgba(255,255,255,0.06))',
+                  backdropFilter: 'blur(6px)',
+                  borderRadius: 999
+                },
+                '& .MuiSlider-track': {
+                  border: 'none',
+                  background: 'linear-gradient(90deg, #00E5FF 0%, #7C4DFF 100%)',
+                  boxShadow: '0 4px 14px rgba(124,77,255,0.35)',
+                  borderRadius: 999
+                },
+                '& .MuiSlider-thumb': {
+                  width: 14,
+                  height: 14,
+                  backgroundColor: '#fff',
+                  border: '1px solid rgba(0,0,0,0.25)',
+                  boxShadow: '0 2px 10px rgba(0,0,0,0.35)',
+                  backdropFilter: 'blur(4px)',
+                  '&:hover, &.Mui-focusVisible': {
+                    boxShadow: '0 0 0 8px rgba(124,77,255,0.16)'
+                  },
+                  '&::before': { boxShadow: 'none' }
+                }
+              }}
+            />
+            <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mt: 2, mb: 1 }}>
+              <Typography variant="subtitle2">Brush Opacity</Typography>
+              <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 'bold' }}>
+                {Math.round(brushOpacity * 100)}%
+              </Typography>
+            </Box>
+            <Slider
+              min={0.1}
+              max={1}
+              step={0.05}
+              value={brushOpacity}
+              onChange={(_, v) => setBrushOpacity(v as number)}
+              sx={{
+                height: 6,
+                padding: '12px 0',
+                '& .MuiSlider-rail': {
+                  opacity: 0.35,
+                  background: 'linear-gradient(90deg, rgba(255,255,255,0.18), rgba(255,255,255,0.06))',
+                  backdropFilter: 'blur(6px)',
+                  borderRadius: 999
+                },
+                '& .MuiSlider-track': {
+                  border: 'none',
+                  background: 'linear-gradient(90deg, #00C9A7 0%, #6E8EF5 100%)',
+                  boxShadow: '0 4px 14px rgba(0,201,167,0.35)',
+                  borderRadius: 999
+                },
+                '& .MuiSlider-thumb': {
+                  width: 14,
+                  height: 14,
+                  backgroundColor: '#fff',
+                  border: '1px solid rgba(0,0,0,0.25)',
+                  boxShadow: '0 2px 10px rgba(0,0,0,0.35)',
+                  backdropFilter: 'blur(4px)',
+                  '&:hover, &.Mui-focusVisible': {
+                    boxShadow: '0 0 0 8px rgba(0,201,167,0.16)'
+                  },
+                  '&::before': { boxShadow: 'none' }
+                }
+              }}
+            />
+            <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mt: 2, mb: 1 }}>
+              <Typography variant="subtitle2">Canvas Influence</Typography>
+              <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 'bold' }}>
+                {canvasInfluence}%
+              </Typography>
+            </Box>
+            <Slider
+              min={10}
+              max={100}
+              step={1}
+              value={canvasInfluence}
+              onChange={(_, v) => setCanvasInfluence(v as number)}
+              sx={{
+                height: 6,
+                padding: '12px 0',
+                '& .MuiSlider-rail': {
+                  opacity: 0.35,
+                  background: 'linear-gradient(90deg, rgba(255,255,255,0.18), rgba(255,255,255,0.06))',
+                  backdropFilter: 'blur(6px)',
+                  borderRadius: 999
+                },
+                '& .MuiSlider-track': {
+                  border: 'none',
+                  background: 'linear-gradient(90deg, #FF6B6B 0%, #FFD93D 100%)',
+                  boxShadow: '0 4px 14px rgba(255,107,107,0.35)',
+                  borderRadius: 999
+                },
+                '& .MuiSlider-thumb': {
+                  width: 14,
+                  height: 14,
+                  backgroundColor: '#fff',
+                  border: '1px solid rgba(0,0,0,0.25)',
+                  boxShadow: '0 2px 10px rgba(0,0,0,0.35)',
+                  backdropFilter: 'blur(4px)',
+                  '&:hover, &.Mui-focusVisible': {
+                    boxShadow: '0 0 0 8px rgba(255,107,107,0.16)'
+                  },
+                  '&::before': { boxShadow: 'none' }
+                }
+              }}
+            />
+            {isApplePencilActive && (
+              <Box sx={{ mt: 2 }}>
+                <Typography variant="subtitle2" sx={{ mb: 1 }}>Pressure</Typography>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                  <Box sx={{ 
+                    width: '100%', 
+                    height: 8, 
+                    bgcolor: 'grey.200', 
+                    borderRadius: 1, 
+                    overflow: 'hidden',
+                    position: 'relative'
+                  }}>
+                    <Box sx={{ 
+                      width: `${currentPressure * 100}%`, 
+                      height: '100%', 
+                      bgcolor: 'primary.main',
+                      transition: 'width 0.1s ease-out'
+                    }} />
+                  </Box>
+                  <Typography variant="caption" sx={{ minWidth: '35px', textAlign: 'right' }}>
+                    {Math.round(currentPressure * 100)}%
+                  </Typography>
+                </Box>
+              </Box>
+            )}
+            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
+              {isApplePencilActive ? 'Apple Pencil detected - pressure sensitive drawing enabled' : 'Tip: Hold mouse to draw, release to stop.'}
+            </Typography>
+          </Box>
+          <Divider />
+          <Box sx={{ p: 2 }}>
+            <UsageBar usageStatus={usageStatus} onReset={resetUsage} />
+          </Box>
+        </Box>
+      </Drawer>
+
+      {/* Mobile Right Drawer */}
+      <Drawer 
+        anchor="right" 
+        open={rightDrawerOpen} 
+        onClose={() => setRightDrawerOpen(false)}
+        sx={{ display: { xs: 'block', md: 'none' } }}
+      >
+        <Box sx={{ width: 300, height: '100%', display: 'flex', flexDirection: 'column' }}>
+          {/* Mobile Tab Navigation */}
+          <Box sx={{ display: 'flex', borderBottom: '1px solid', borderColor: 'divider' }}>
+            <Button
+              variant={rightSidebarTab === 'jewellery' ? 'contained' : 'text'}
+              onClick={() => setRightSidebarTab('jewellery')}
+              sx={{
+                flex: 1,
+                borderRadius: 0,
+                textTransform: 'none',
+                fontWeight: 'bold',
+                fontSize: '0.875rem',
+                py: 1.5,
+                ...(rightSidebarTab === 'jewellery' ? {
+                  bgcolor: 'primary.main',
+                  color: 'white',
+                  '&:hover': { bgcolor: 'primary.dark' }
+                } : {
+                  color: 'text.secondary',
+                  '&:hover': { bgcolor: 'action.hover' }
+                })
+              }}
+            >
+              Jewellery Controls
+            </Button>
+            <Button
+              variant={rightSidebarTab === 'more' ? 'contained' : 'text'}
+              onClick={() => setRightSidebarTab('more')}
+              sx={{
+                flex: 1,
+                borderRadius: 0,
+                textTransform: 'none',
+                fontWeight: 'bold',
+                fontSize: '0.875rem',
+                py: 1.5,
+                ...(rightSidebarTab === 'more' ? {
+                  bgcolor: 'primary.main',
+                  color: 'white',
+                  '&:hover': { bgcolor: 'primary.dark' }
+                } : {
+                  color: 'text.secondary',
+                  '&:hover': { bgcolor: 'action.hover' }
+                })
+              }}
+            >
+              More
+            </Button>
+          </Box>
+
+          {/* Mobile Tab Content */}
+          {rightSidebarTab === 'jewellery' && (
+            <Box sx={{ p: 1.5, display: 'grid', gap: 1.25 }}>
+              <Typography variant="subtitle2" sx={{ fontWeight: 'bold' }}>Jewellery Controls</Typography>
+            <ButtonGroup size="small" orientation="vertical" variant="outlined" sx={{ gap: 1 }}>
+              <Button 
+                variant="contained" 
+                onClick={() => {
+                  const result = trackUsage('generate')
+                  if (result.allowed > 0) {
+                    console.log('Generate Jewellery clicked - Usage tracked')
+                    // TODO: Implement actual AI generation
+                  } else {
+                    console.log('Generate Jewellery blocked - Usage limit reached')
+                  }
+                }}
+                sx={{
+                  background: 'linear-gradient(135deg, #2c3e50 0%, #000000 100%)',
+                  border: 'none',
+                  borderRadius: 3,
+                  textTransform: 'none',
+                  fontWeight: 600,
+                  fontSize: '0.875rem',
+                  py: 1.5,
+                  boxShadow: '0 8px 32px rgba(0, 0, 0, 0.3)',
+                  position: 'relative',
+                  overflow: 'hidden',
+                  '&:hover': {
+                    background: 'linear-gradient(135deg, #1a252f 0%, #000000 100%)',
+                    boxShadow: '0 12px 40px rgba(0, 0, 0, 0.4)',
+                    transform: 'translateY(-2px)',
+                    transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+                  },
+                  '&:active': {
+                    transform: 'translateY(0px)',
+                    boxShadow: '0 4px 20px rgba(0, 0, 0, 0.3)',
+                  },
+                  '&::before': {
+                    content: '""',
+                    position: 'absolute',
+                    top: 0,
+                    left: '-100%',
+                    width: '100%',
+                    height: '100%',
+                    background: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.2), transparent)',
+                    transition: 'left 0.5s',
+                  },
+                  '&:hover::before': {
+                    left: '100%',
+                  }
+                }}
+              >
+                Generate Jewellery
+              </Button>
+              <Button 
+                onClick={() => {
+                  const result = trackUsage('harmonize')
+                  if (result.allowed > 0) {
+                    console.log('Harmonize clicked - Usage tracked')
+                    // TODO: Implement actual harmonization
+                  } else {
+                    console.log('Harmonize blocked - Usage limit reached')
+                  }
+                }}
+                sx={{
+                  background: 'linear-gradient(135deg, rgba(255,255,255,0.1) 0%, rgba(255,255,255,0.05) 100%)',
+                  backdropFilter: 'blur(10px)',
+                  border: '1px solid rgba(0,0,0,0.1)',
+                  borderRadius: 3,
+                  textTransform: 'none',
+                  fontWeight: 600,
+                  fontSize: '0.875rem',
+                  py: 1.5,
+                  color: 'text.primary',
+                  boxShadow: '0 8px 32px rgba(0,0,0,0.1)',
+                  position: 'relative',
+                  overflow: 'hidden',
+                  '&:hover': {
+                    background: 'linear-gradient(135deg, rgba(255,255,255,0.2) 0%, rgba(255,255,255,0.1) 100%)',
+                    border: '1px solid rgba(0,0,0,0.15)',
+                    boxShadow: '0 12px 40px rgba(0,0,0,0.15)',
+                    transform: 'translateY(-2px)',
+                    transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+                  },
+                  '&:active': {
+                    transform: 'translateY(0px)',
+                    boxShadow: '0 4px 20px rgba(0,0,0,0.1)',
+                  },
+                  '&::before': {
+                    content: '""',
+                    position: 'absolute',
+                    top: 0,
+                    left: '-100%',
+                    width: '100%',
+                    height: '100%',
+                    background: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.1), transparent)',
+                    transition: 'left 0.5s',
+                  },
+                  '&:hover::before': {
+                    left: '100%',
+                  }
+                }}
+              >
+                Harmonize
+              </Button>
+            </ButtonGroup>
+            <Divider />
+            <Box sx={{ p: 1.5, display: 'grid', gap: 1 }}>
+            <Typography variant="subtitle2" sx={{ fontWeight: 'bold' }}>Stone Settings</Typography>
+            <Box sx={{ display: 'flex', gap: 1, justifyContent: 'space-between' }}>
+              <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 0.5 }}>
+                <Typography variant="caption" sx={{ fontSize: '0.7rem', color: 'text.secondary', fontWeight: 'bold' }}>Primary</Typography>
+                <StoneGrid selected={primaryStone} onOpen={(e) => { setStoneAnchor(e.currentTarget); setStoneType('primary') }} label={findStoneDetails(primaryStone).label} icon={findStoneDetails(primaryStone).icon} type="primary" />
+              </Box>
+              <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 0.5 }}>
+                <Typography variant="caption" sx={{ fontSize: '0.7rem', color: 'text.secondary', fontWeight: 'bold' }}>Secondary</Typography>
+                <StoneGrid selected={secondaryStone || ''} onOpen={(e) => { setStoneAnchor(e.currentTarget); setStoneType('secondary') }} label={secondaryStone ? findStoneDetails(secondaryStone).label : 'None'} icon={secondaryStone ? findStoneDetails(secondaryStone).icon : ''} type="secondary" />
+              </Box>
+              <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 0.5 }}>
+                <Typography variant="caption" sx={{ fontSize: '0.7rem', color: 'text.secondary', fontWeight: 'bold' }}>Metal</Typography>
+                <MetalGrid selected={metal} onOpen={(e) => setMetalAnchor(e.currentTarget)} label={METALS.find(m => m.key === metal)?.label || ''} />
+              </Box>
+            </Box>
+          </Box>
+        </Box>
+        )}
+
+        {rightSidebarTab === 'more' && (
+          <Box sx={{ p: 1.5, display: 'grid', gap: 1.25 }}>
+            <Typography variant="subtitle2" sx={{ fontWeight: 'bold' }}>More Options</Typography>
+            <Typography variant="body2" color="text.secondary" sx={{ textAlign: 'center', py: 2 }}>
+              Additional options will be added here
+            </Typography>
+          </Box>
+        )}
+      </Drawer>
+
+      {/* Mobile Floating Action Buttons */}
+      <Fab
+        color="primary"
+        sx={{ 
+          position: 'fixed', 
+          bottom: 16, 
+          left: 16, 
+          display: { xs: 'flex', md: 'none' },
+          zIndex: 1000
+        }}
+        onClick={() => setLeftDrawerOpen(true)}
+      >
+        <LayersIcon />
+      </Fab>
+      <Fab
+        color="secondary"
+        sx={{ 
+          position: 'fixed', 
+          bottom: 16, 
+          right: 16, 
+          display: { xs: 'flex', md: 'none' },
+          zIndex: 1000
+        }}
+        onClick={() => setRightDrawerOpen(true)}
+      >
+        <Settings />
+      </Fab>
+    </Box>
+  )
+}
+
+// Helpers / small presentational components
+
+function StoneGrid({ selected, onOpen, label, icon, type }: { selected: string; onOpen: (e: any) => void; label: string; icon: string; type: 'primary' | 'secondary' }) {
+  // Modern minimal icons
+  const getIcon = () => {
+    if (type === 'primary') {
+      // Solitaire icon - single diamond
+      return (
+        <Box sx={{ 
+          width: 20, 
+          height: 20, 
+          display: 'flex', 
+          alignItems: 'center', 
+          justifyContent: 'center',
+          position: 'relative'
+        }}>
+          <Box sx={{
+            width: 12,
+            height: 12,
+            border: '2px solid',
+            borderColor: 'text.primary',
+            borderRadius: '50%',
+            position: 'relative',
+            '&::before': {
+              content: '""',
+              position: 'absolute',
+              top: '50%',
+              left: '50%',
+              transform: 'translate(-50%, -50%)',
+              width: 6,
+              height: 6,
+              border: '1px solid',
+              borderColor: 'text.primary',
+              borderRadius: '50%',
+            }
+          }} />
+        </Box>
+      )
+    } else {
+      // Small stones icon - multiple small diamonds
+      return (
+        <Box sx={{ 
+          width: 20, 
+          height: 20, 
+          display: 'flex', 
+          alignItems: 'center', 
+          justifyContent: 'center',
+          gap: 0.5
+        }}>
+          <Box sx={{
+            width: 4,
+            height: 4,
+            border: '1px solid',
+            borderColor: 'text.primary',
+            borderRadius: '50%',
+          }} />
+          <Box sx={{
+            width: 4,
+            height: 4,
+            border: '1px solid',
+            borderColor: 'text.primary',
+            borderRadius: '50%',
+          }} />
+          <Box sx={{
+            width: 4,
+            height: 4,
+            border: '1px solid',
+            borderColor: 'text.primary',
+            borderRadius: '50%',
+          }} />
+        </Box>
+      )
+    }
+  }
+
+  return (
+    <Card variant="outlined" sx={{ borderRadius: 1, aspectRatio: '1', width: 60, height: 60 }}>
+      <CardActionArea 
+        onClick={onOpen} 
+        sx={{ 
+          display: 'flex', 
+          flexDirection: 'column',
+          justifyContent: 'center', 
+          alignItems: 'center', 
+          p: 0.5,
+          height: '100%',
+          minHeight: 60
+        }}
+      >
+        <MUICardContent sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 0.25, p: 0 }}>
+          {getIcon()}
+          <Typography variant="caption" sx={{ textAlign: 'center', fontSize: '0.6rem', lineHeight: 1 }}>{label}</Typography>
+        </MUICardContent>
+      </CardActionArea>
+    </Card>
+  )
+}
+
+function MetalGrid({ selected, onOpen, label }: { selected: string; onOpen: (e: any) => void; label: string }) {
+  return (
+    <Card variant="outlined" sx={{ borderRadius: 1, aspectRatio: '1', width: 60, height: 60 }}>
+      <CardActionArea 
+        onClick={onOpen} 
+        sx={{ 
+          display: 'flex', 
+          flexDirection: 'column',
+          justifyContent: 'center', 
+          alignItems: 'center', 
+          p: 0.5,
+          height: '100%',
+          minHeight: 60
+        }}
+      >
+        <MUICardContent sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 0.25, p: 0 }}>
+          <Typography variant="caption" sx={{ textAlign: 'center', fontSize: '0.6rem', lineHeight: 1 }}>{label}</Typography>
+        </MUICardContent>
+      </CardActionArea>
+    </Card>
+  )
+}
+
+

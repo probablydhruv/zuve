@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Magic Bento Test</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            background: #f0f0f0;
+            font-family: Arial, sans-serif;
+        }
+        .test-container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        .card-grid {
+            display: grid;
+            gap: 20px;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+        }
+        .card {
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+            padding: 20px;
+            border-radius: 20px;
+            color: white;
+            min-height: 200px;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+        }
+        .card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+        }
+        .card__label {
+            font-size: 14px;
+            opacity: 0.8;
+            margin-bottom: 10px;
+        }
+        .card__title {
+            font-size: 18px;
+            font-weight: 600;
+            margin-bottom: 10px;
+        }
+        .card__description {
+            font-size: 14px;
+            opacity: 0.9;
+            line-height: 1.4;
+        }
+    </style>
+</head>
+<body>
+    <div class="test-container">
+        <h1>Magic Bento Test - Jewelry Features</h1>
+        <div class="card-grid">
+            <div class="card">
+                <div class="card__label">Design</div>
+                <div class="card__content">
+                    <h2 class="card__title">Content Builder</h2>
+                    <p class="card__description">Describes your jewellery designs in one click, while maintaining the tone of your brand</p>
+                </div>
+            </div>
+            <div class="card">
+                <div class="card__label">Video</div>
+                <div class="card__content">
+                    <h2 class="card__title">Instant 360 Video</h2>
+                    <p class="card__description">Create high quality videos to share with your clients. All under 60 seconds</p>
+                </div>
+            </div>
+            <div class="card">
+                <div class="card__label">AI</div>
+                <div class="card__content">
+                    <h2 class="card__title">Signature Style</h2>
+                    <p class="card__description">Zuve AI Studio learns your brand's design language and remembers it</p>
+                </div>
+            </div>
+            <div class="card">
+                <div class="card__label">Library</div>
+                <div class="card__content">
+                    <h2 class="card__title">Motif Library</h2>
+                    <p class="card__description">Find all your motifs and elements in one place</p>
+                </div>
+            </div>
+            <div class="card">
+                <div class="card__label">Production</div>
+                <div class="card__content">
+                    <h2 class="card__title">Auto Job Cards</h2>
+                    <p class="card__description">Creates a job card in one click for your production team</p>
+                </div>
+            </div>
+            <div class="card">
+                <div class="card__label">Assistant</div>
+                <div class="card__content">
+                    <h2 class="card__title">Stone Layout Assistant</h2>
+                    <p class="card__description">Smart placement guidance</p>
+                </div>
+            </div>
+            <div class="card">
+                <div class="card__label">Gallery</div>
+                <div class="card__content">
+                    <h2 class="card__title">Inspiration Gallery</h2>
+                    <p class="card__description">Browse through 1000s of jewellery designs augmented by AI</p>
+                </div>
+            </div>
+            <div class="card">
+                <div class="card__label">Export</div>
+                <div class="card__content">
+                    <h2 class="card__title">Intelligent Presentation</h2>
+                    <p class="card__description">Export your designs as professional presentations instantly</p>
+                </div>
+            </div>
+            <div class="card">
+                <div class="card__label">Analytics</div>
+                <div class="card__content">
+                    <h2 class="card__title">Collection Analysis</h2>
+                    <p class="card__description">Analyze your collection performance and trends</p>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

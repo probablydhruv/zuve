@@ -1,0 +1,54 @@
+VERCEL ENVIRONMENT VARIABLES - Copy and paste these into Vercel
+
+=================================================================
+FIREBASE MAIN PROJECT (zuve-jewellery)
+=================================================================
+
+NEXT_PUBLIC_FIREBASE_API_KEY
+AIzaSyD9r3tLp785GdPpK2bP46QcKrxPygwIDOo
+
+NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN
+zuve-jewellery.firebaseapp.com
+
+NEXT_PUBLIC_FIREBASE_PROJECT_ID
+zuve-jewellery
+
+NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET
+zuve-jewellery.firebasestorage.app
+
+NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID
+78294265791
+
+NEXT_PUBLIC_FIREBASE_APP_ID
+1:78294265791:web:8663b854e180a7a9607b0a
+
+NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID
+G-QTE80Y0KJZ
+
+=================================================================
+FIREBASE FUNCTIONS PROJECT (zuvestudio50)
+=================================================================
+
+NEXT_PUBLIC_FUNCTIONS_API_KEY
+AIzaSyCZa3dCnAbFYQDfeR5vJzgOvMv4zifdpns
+
+NEXT_PUBLIC_FUNCTIONS_AUTH_DOMAIN
+zuvestudio50.firebaseapp.com
+
+NEXT_PUBLIC_FUNCTIONS_PROJECT_ID
+zuvestudio50
+
+NEXT_PUBLIC_FUNCTIONS_STORAGE_BUCKET
+zuvestudio50.firebasestorage.app
+
+NEXT_PUBLIC_FUNCTIONS_MESSAGING_SENDER_ID
+78019259365
+
+NEXT_PUBLIC_FUNCTIONS_APP_ID
+1:78019259365:web:1c2930e804d4aee6b21d0c
+
+=================================================================
+IMPORTANT: Select "Production", "Preview", and "Development" 
+for EACH variable when adding them to Vercel!
+=================================================================
+

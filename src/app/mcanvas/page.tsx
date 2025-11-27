@@ -1,0 +1,67 @@
+'use client'
+
+import { useEffect, useState } from 'react'
+import { useRouter } from 'next/navigation'
+import MobileCanvas from '@/components/mobile/MobileCanvas'
+
+export default function MobileCanvasPage() {
+  const router = useRouter()
+  const [isMobile, setIsMobile] = useState(false)
+
+  useEffect(() => {
+    // Check for testing bypass parameter
+    const urlParams = new URLSearchParams(window.location.search)
+    const forceMobile = urlParams.get('mobile') === 'true'
+    
+    // Check if device is mobile (excluding tablets/iPads)
+    const checkMobile = () => {
+      const userAgent = navigator.userAgent
+      const isMobileDevice = /Android|webOS|iPhone|iPod|BlackBerry|IEMobile|Opera Mini/i.test(userAgent)
+      const isTablet = /iPad|Android(?=.*\bMobile\b)/i.test(userAgent)
+      const isSmallScreen = window.innerWidth < 768
+      
+      // For testing: also check if we're in mobile viewport or force parameter
+      const isMobileViewport = window.innerWidth < 768
+      
+      return forceMobile || (isMobileDevice && !isTablet) || isMobileViewport
+    }
+
+    const handleResize = () => {
+      const mobile = checkMobile()
+      setIsMobile(mobile)
+      
+      // Redirect desktop users to regular canvas (unless forced)
+      if (!mobile && !forceMobile) {
+        router.push('/canvas/1')
+      }
+    }
+
+    // Initial check
+    handleResize()
+
+    // Listen for resize events (when dev tools change device)
+    window.addEventListener('resize', handleResize)
+    
+    return () => {
+      window.removeEventListener('resize', handleResize)
+    }
+  }, [router])
+
+  if (!isMobile) {
+    return (
+      <div style={{ 
+        display: 'flex', 
+        alignItems: 'center', 
+        justifyContent: 'center', 
+        height: '100vh',
+        flexDirection: 'column',
+        gap: '16px'
+      }}>
+        <h2>Redirecting to desktop canvas...</h2>
+        <p>This page is optimized for mobile devices.</p>
+      </div>
+    )
+  }
+
+  return <MobileCanvas />
+}
