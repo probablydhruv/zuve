@@ -47,9 +47,9 @@ export type CanvasData = {
   updatedAt: Timestamp | Date
 }
 
-// User profile helpers
+// User profile helpers - now reading from user document directly
 export const userProfileDoc = (userId: string) =>
-  doc(db, 'users', userId, 'profile', 'data')
+  doc(db, 'users', userId)
 
 // Projects collection helpers
 export const projectsCollection = (userId: string) => 
@@ -63,7 +63,7 @@ export const canvasDoc = (userId: string, projectId: string) =>
 
 // ==================== User Profile Functions ====================
 
-// Get user profile
+// Get user profile - reads from user document directly
 export async function getUserProfile(userId: string): Promise<UserProfile | null> {
   if (!userId) return null
   
@@ -72,14 +72,22 @@ export async function getUserProfile(userId: string): Promise<UserProfile | null
     const profileSnap = await getDoc(profileRef)
     
     if (!profileSnap.exists()) {
-      // Profile doesn't exist yet - will be created on first login
-      console.log('User profile not found, will create on demand')
+      // User document doesn't exist yet - will be created on first login
+      console.log('User document not found, will create on demand')
       return null
     }
     
     const data = profileSnap.data()
+    // Ensure tier exists, default to 'free' if missing
+    const tier = (data.tier || 'free') as TierType
+    
     return {
-      ...data,
+      uid: userId,
+      email: data.email || '',
+      displayName: data.displayName || '',
+      tier: tier,
+      subscriptionId: data.subscriptionId,
+      subscriptionStatus: data.subscriptionStatus,
       createdAt: data.createdAt?.toDate() || new Date(),
       updatedAt: data.updatedAt?.toDate() || new Date(),
     } as UserProfile
@@ -93,7 +101,7 @@ export async function getUserProfile(userId: string): Promise<UserProfile | null
   }
 }
 
-// Create user profile
+// Create user profile - writes to user document directly
 export async function createUserProfile(
   userId: string, 
   data: { tier: TierType; email?: string; displayName?: string }
@@ -111,8 +119,9 @@ export async function createUserProfile(
       updatedAt: serverTimestamp(),
     }
     
+    // Use merge: true to preserve existing fields (like photoURL, etc.)
     await setDoc(profileRef, newProfile, { merge: true })
-    console.log('User profile created:', userId, 'tier:', data.tier)
+    console.log('User profile created/updated:', userId, 'tier:', data.tier)
     
     return {
       ...newProfile,

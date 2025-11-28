@@ -1,17 +1,16 @@
 'use client'
 
-import { Box, Typography, LinearProgress, IconButton, Tooltip } from '@mui/material'
-import { Refresh, Info } from '@mui/icons-material'
+import { Box, Typography, LinearProgress, Tooltip } from '@mui/material'
+import { Info } from '@mui/icons-material'
 import { UsageStatus } from '@/lib/usageTracker'
 import { useState, useEffect } from 'react'
 
 interface UsageBarProps {
   usageStatus: UsageStatus
   onUsageClick?: () => void
-  onReset?: () => void
 }
 
-export default function UsageBar({ usageStatus, onUsageClick, onReset }: UsageBarProps) {
+export default function UsageBar({ usageStatus, onUsageClick }: UsageBarProps) {
   const { color, cooldownUntil, windowUsages, bottleneckWindow, remainingInBottleneck, overdraft, tierName } = usageStatus
   const [availableTime, setAvailableTime] = useState<string>('')
 
@@ -182,28 +181,6 @@ export default function UsageBar({ usageStatus, onUsageClick, onReset }: UsageBa
             }}>
               {getStatusText()}
             </Typography>
-            {onReset && (
-              <IconButton
-                size="small"
-                onClick={(e) => {
-                  e.stopPropagation()
-                  onReset()
-                }}
-                sx={{
-                  color: 'rgba(255,255,255,0.6)',
-                  '&:hover': {
-                    color: 'rgba(255,255,255,0.9)',
-                    backgroundColor: 'rgba(255,255,255,0.1)'
-                  },
-                  padding: '2px',
-                  minWidth: 'auto',
-                  width: '20px',
-                  height: '20px'
-                }}
-              >
-                <Refresh sx={{ fontSize: '0.8rem' }} />
-              </IconButton>
-            )}
           </Box>
         </Box>
         

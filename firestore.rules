@@ -13,16 +13,17 @@ service cloud.firestore {
     }
     
     // ==================== User Profile Rules ====================
-    match /users/{userId}/profile/data {
-      // Users can read their own profile
+    // User document - tier is stored directly on the user document
+    match /users/{userId} {
+      // Users can read their own document
       allow read: if isOwner(userId);
       
-      // Users can create their own profile (only with 'free' tier)
+      // Users can create their own document (only with 'free' tier if tier is set)
       allow create: if isOwner(userId) 
-                    && request.resource.data.tier == 'free'
+                    && (!request.resource.data.keys().hasAny(['tier']) || request.resource.data.tier == 'free')
                     && request.resource.data.uid == userId;
       
-      // Users can update their own profile EXCEPT tier and subscription fields
+      // Users can update their own document EXCEPT tier and subscription fields
       // Tier and subscription can only be updated via Cloud Functions (server-side)
       allow update: if isOwner(userId)
                     && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['tier', 'subscriptionId', 'subscriptionStatus']);

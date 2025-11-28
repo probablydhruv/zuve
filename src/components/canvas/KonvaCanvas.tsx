@@ -2414,7 +2414,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
         </Box>
         <Divider />
         <Box sx={{ p: 2 }}>
-          <UsageBar usageStatus={usageStatus} onReset={resetUsage} />
+          <UsageBar usageStatus={usageStatus} />
         </Box>
       </Box>
 
@@ -4878,7 +4878,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
           </Box>
           <Divider />
           <Box sx={{ p: 2 }}>
-            <UsageBar usageStatus={usageStatus} onReset={resetUsage} />
+            <UsageBar usageStatus={usageStatus} />
           </Box>
         </Box>
       </Drawer>
