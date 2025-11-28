@@ -526,6 +526,9 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
 
       // Add to generated images library (check for duplicates)
       setGeneratedImages(prev => {
+        if (!data.downloadURL) {
+          return prev // Safety check
+        }
         if (prev.includes(data.downloadURL)) {
           return prev // Don't add duplicates
         }
