@@ -198,7 +198,7 @@ Antique
   return { downloadURL: dataUrl }
 })
 
-// Aura Assist: Return a short (<= 40 words) expert review based on sketch
+// Aura Assist: Return an expert review based on sketch (full text, UI handles scrolling)
 export const auraAssist = functions
   .region("asia-south1")
   .runWith({ secrets: ["GEMINI_API_KEY"] })
@@ -238,10 +238,8 @@ export const auraAssist = functions
       if (!suggestion) {
         throw new functions.https.HttpsError('failed-precondition', 'Model returned no text suggestion')
       }
-      // Optionally trim to ~40 words
-      const words = suggestion.split(/\s+/)
-      const trimmed = words.length > 40 ? words.slice(0, 40).join(' ') + '…' : suggestion
-      return { suggestion: trimmed }
+      // Return the full suggestion (UI handles scrolling for long text)
+      return { suggestion }
     } catch (error) {
       const errObj = error as { message?: string }
       const msg = errObj?.message || 'Failed to get suggestion'

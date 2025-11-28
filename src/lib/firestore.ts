@@ -44,6 +44,7 @@ export type CanvasData = {
   layers: any[]
   zoom: number
   canvasSize: { width: number; height: number }
+  generatedImages?: string[] // Array of generated/harmonized image URLs
   updatedAt: Timestamp | Date
 }
 

@@ -2,9 +2,10 @@
 
 import { useRef, useState, useEffect, useCallback } from 'react'
 import { Stage, Layer, Line, Image as KonvaImage, Transformer, Rect, Group, Text, Circle } from 'react-konva'
-import { Box, Slider, ToggleButton, ToggleButtonGroup, Button, Divider, Typography, IconButton, Menu, MenuItem, Tooltip, List, ListItem, ListItemText, ListItemSecondaryAction, ButtonGroup, Card, CardActionArea, CardContent as MUICardContent, Drawer, Fab, TextField, Checkbox, CircularProgress, Snackbar, Alert } from '@mui/material'
-import { Add, Delete, Visibility, VisibilityOff, Undo, Redo, ZoomIn, ZoomOut, PanToolAlt, Gesture, Colorize, Layers as LayersIcon, Settings, AutoFixHigh, Close, Campaign, ContentCopy, Crop, ContentCut, Info, DesignServices, SettingsSuggest, SwapHoriz, Download } from '@mui/icons-material'
+import { Box, Slider, ToggleButton, ToggleButtonGroup, Button, Divider, Typography, IconButton, Menu, MenuItem, Tooltip, List, ListItem, ListItemText, ListItemSecondaryAction, ButtonGroup, Card, CardActionArea, CardContent as MUICardContent, Drawer, Fab, TextField, Checkbox, CircularProgress, Snackbar, Alert, Dialog, DialogTitle, DialogContent, DialogContentText, DialogActions, Collapse, Slide } from '@mui/material'
+import { Add, Delete, Visibility, VisibilityOff, Undo, Redo, ZoomIn, ZoomOut, PanToolAlt, Gesture, Layers as LayersIcon, Settings, AutoFixHigh, Close, Campaign, ContentCopy, Crop, ContentCut, Info, DesignServices, SettingsSuggest, SwapHoriz, Download, DeleteSweep, ExpandMore, ExpandLess } from '@mui/icons-material'
 import { LightMode, DarkMode } from '@mui/icons-material'
+import { Eraser } from 'lucide-react'
 import { useTheme } from '@mui/material/styles'
 import { httpsCallable } from 'firebase/functions'
 import { FirebaseError } from 'firebase/app'
@@ -144,6 +145,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
   const [currentPressure, setCurrentPressure] = useState(1)
   const [isApplePencilActive, setIsApplePencilActive] = useState(false)
   const [toolbarPosition, setToolbarPosition] = useState({ x: 350, y: 12 })
+  const [toolbarCentered, setToolbarCentered] = useState(true)
   const [isDragging, setIsDragging] = useState(false)
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 })
   const [uploadedImages, setUploadedImages] = useState<any[]>([])
@@ -172,6 +174,9 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
   const [compareSliderValue, setCompareSliderValue] = useState(50)
   const [generationError, setGenerationError] = useState<string | null>(null)
   const [snackbar, setSnackbar] = useState<{ message: string; severity: 'success' | 'error' } | null>(null)
+  const [showClearAllDialog, setShowClearAllDialog] = useState(false)
+  const [generatedImages, setGeneratedImages] = useState<string[]>([])
+  const [imageLibraryExpanded, setImageLibraryExpanded] = useState(false)
 
   // On-canvas compare (AI render over sketch with draggable vertical bar)
   const [generatedImageElement, setGeneratedImageElement] = useState<HTMLImageElement | null>(null)
@@ -227,11 +232,12 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
     console.log('Active layer changed to:', activeLayerId)
   }, [activeLayerId])
 
-  // Center toolbar when canvas size changes
+  // Center toolbar when canvas size changes (only if not manually positioned)
   useEffect(() => {
-    const centerX = (canvasSize.width - 300) / 2 // Approximate toolbar width is ~300px
-    setToolbarPosition(prev => ({ ...prev, x: Math.max(0, centerX) }))
-  }, [canvasSize.width])
+    if (toolbarCentered) {
+      setToolbarPosition(prev => ({ ...prev, y: 12 }))
+    }
+  }, [canvasSize.width, toolbarCentered])
   
   // Associate content with layers
   const [lineLayerMap, setLineLayerMap] = useState<{ [lineIndex: number]: string }>({})
@@ -503,7 +509,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
         metalColor: metal || undefined,
         primaryStone: primaryStone || undefined,
         secondaryStone: secondaryStone || undefined,
-        userContext: (contentDetails || '').trim() || undefined
+        userContext: (contextText || '').trim() || undefined
       })
 
       const data = response.data
@@ -517,6 +523,19 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
       } else {
         setHarmonizedImageUrl(data.downloadURL)
       }
+
+      // Add to generated images library (check for duplicates)
+      setGeneratedImages(prev => {
+        if (prev.includes(data.downloadURL)) {
+          return prev // Don't add duplicates
+        }
+        const updated = [...prev, data.downloadURL]
+        // Expand library panel if this is the first image
+        if (prev.length === 0) {
+          setImageLibraryExpanded(true)
+        }
+        return updated
+      })
 
       // Set current view: prefer harmonized if both exist, otherwise use the new one
       const newRenderedUrl = action === 'generate' ? data.downloadURL : renderedImageUrl
@@ -600,6 +619,25 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
       severity: 'success'
     })
   }, [currentViewImageUrl])
+
+  const handleDownloadImageFromLibrary = useCallback((url: string, e?: React.MouseEvent) => {
+    if (e) {
+      e.stopPropagation() // Prevent thumbnail click from changing canvas view
+    }
+    
+    // Create a temporary link element
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `zuve-render-${Date.now()}.png`
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    
+    setSnackbar({
+      message: 'Image downloaded successfully!',
+      severity: 'success'
+    })
+  }, [])
 
   // Motif Browser functions
   const startCreatingMotif = useCallback(() => {
@@ -1363,6 +1401,16 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
           if (savedData.zoom) setZoom(savedData.zoom)
           if (savedData.canvasSize) setCanvasSize(savedData.canvasSize)
           if (savedData.layers) setLayers(savedData.layers)
+          // Restore generated images library
+          if (savedData.generatedImages && savedData.generatedImages.length > 0) {
+            setGeneratedImages(savedData.generatedImages)
+            setImageLibraryExpanded(true)
+            // Set the most recent image as current view (last in array)
+            const lastImage = savedData.generatedImages[savedData.generatedImages.length - 1]
+            setCurrentViewImageUrl(lastImage)
+            // Try to determine if it's rendered or harmonized based on position
+            // For now, just set it as current view
+          }
           // Note: images need special handling as they need to be loaded as HTMLImageElements
           // We'll handle image restoration separately if needed
         }
@@ -1404,7 +1452,8 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
           imagesCount: uploadedImages.length,
           layersCount: layers.length,
           zoom,
-          canvasSize
+          canvasSize,
+          generatedImagesCount: generatedImages.length
         })
         await saveCanvasData(user.uid, projectId, {
           lines,
@@ -1412,6 +1461,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
           layers,
           zoom,
           canvasSize,
+          generatedImages,
         })
         console.log('Canvas auto-saved successfully')
       } catch (error: any) {
@@ -1423,7 +1473,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
         })
       }
     }, 2000)
-  }, [user?.uid, projectId, lines, uploadedImages, layers, zoom, canvasSize, isLoadingCanvas])
+  }, [user?.uid, projectId, lines, uploadedImages, layers, zoom, canvasSize, generatedImages, isLoadingCanvas])
 
   // Auto-save when canvas data changes
   useEffect(() => {
@@ -1435,7 +1485,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
     }
     
     // Only trigger auto-save if there's actual content to save
-    if (lines.length === 0 && uploadedImages.length === 0) {
+    if (lines.length === 0 && uploadedImages.length === 0 && generatedImages.length === 0) {
       return
     }
     
@@ -1483,6 +1533,17 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
       setLines([...history[newIndex]])
     }
   }, [historyIndex, history])
+
+  const handleClearAllClick = useCallback(() => {
+    setShowClearAllDialog(true)
+  }, [])
+
+  const clearAll = useCallback(() => {
+    setLines([])
+    setLineLayerMap({})
+    saveToHistory([])
+    setShowClearAllDialog(false)
+  }, [saveToHistory])
 
   const insertMotif = useCallback((motif: {id: string, name: string, data: string}) => {
     console.log('insertMotif called with:', motif.name, 'Data:', motif.data.substring(0, 100) + '...')
@@ -2054,10 +2115,15 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
     const newY = clientY - containerRect.top - dragOffset.y
     
     // Constrain to canvas bounds
-    const constrainedX = Math.max(0, Math.min(newX, containerRect.width - 300)) // 300px is approximate toolbar width
-    const constrainedY = Math.max(0, Math.min(newY, containerRect.height - 50)) // 50px is approximate toolbar height
+    const toolbarElement = document.querySelector('[data-floating-toolbar]') as HTMLElement
+    const toolbarWidth = toolbarElement?.offsetWidth || 300
+    const toolbarHeight = toolbarElement?.offsetHeight || 50
+    
+    const constrainedX = Math.max(0, Math.min(newX, containerRect.width - toolbarWidth))
+    const constrainedY = Math.max(0, Math.min(newY, containerRect.height - toolbarHeight))
     
     setToolbarPosition({ x: constrainedX, y: constrainedY })
+    setToolbarCentered(false) // Mark as manually positioned
   }
 
   const handleToolbarDragEnd = () => {
@@ -2177,7 +2243,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
       overflow: 'hidden',
       display: 'grid', 
       gridTemplateColumns: { xs: '1fr', md: '260px 1fr 300px' }, 
-      gridTemplateRows: '1fr'
+      gridTemplateRows: imageLibraryExpanded ? '1fr auto' : '1fr'
     }}>
       {/* Left Sidebar */}
       <Box sx={{ display: { xs: 'none', md: 'flex' }, flexDirection: 'column', borderRight: '1px solid', borderColor: 'divider' }}>
@@ -3186,12 +3252,16 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
 
         {/* Floating top toolbar */}
         <Box 
+          data-floating-toolbar
           onMouseDown={handleToolbarMouseDown}
           onTouchStart={handleToolbarTouchStart}
           sx={{ 
             position: 'absolute', 
             top: toolbarPosition.y, 
-            left: toolbarPosition.x, 
+            left: toolbarCentered ? '50%' : toolbarPosition.x,
+            transform: toolbarCentered 
+              ? `translateX(-50%) ${isDragging ? 'none' : 'translateY(-1px)'}`
+              : isDragging ? 'none' : 'translateY(-1px)',
             bgcolor: 'background.paper', 
             border: '1px solid', 
             borderColor: 'divider', 
@@ -3207,10 +3277,10 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
             transition: isDragging ? 'none' : 'all 0.2s ease-out',
             '&:hover': {
               boxShadow: '0 8px 24px rgba(0,0,0,0.12)',
-              transform: isDragging ? 'none' : 'translateY(-1px)',
             }
           }}
         >
+          <Tooltip title="Clear All Sketches"><span><IconButton size="small" onClick={(e) => { e.stopPropagation(); handleClearAllClick(); }} disabled={lines.length === 0}><DeleteSweep fontSize="small" /></IconButton></span></Tooltip>
           <Tooltip title="Undo (Cmd+Z / Ctrl+Z)"><span><IconButton size="small" onClick={(e) => { e.stopPropagation(); e.preventDefault(); console.log('Undo button clicked'); undo(); }} disabled={historyIndex <= 0}><Undo fontSize="small" /></IconButton></span></Tooltip>
           <Tooltip title="Redo (Cmd+Shift+Z / Ctrl+Y)"><span><IconButton size="small" onClick={(e) => { e.stopPropagation(); redo(); }} disabled={historyIndex >= history.length - 1}><Redo fontSize="small" /></IconButton></span></Tooltip>
           <Divider orientation="vertical" flexItem sx={{ mx: 0.5 }} />
@@ -3220,7 +3290,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
           <Divider orientation="vertical" flexItem sx={{ mx: 0.5 }} />
           <ToggleButtonGroup exclusive size="small" value={tool} onChange={(_, v) => v && setTool(v)} onClick={(e) => e.stopPropagation()}>
             <ToggleButton value="brush"><Gesture fontSize="small" /></ToggleButton>
-            <ToggleButton value="eraser"><Colorize fontSize="small" /></ToggleButton>
+            <ToggleButton value="eraser"><Eraser size={20} /></ToggleButton>
             <ToggleButton value="hand" disabled={uploadedImages.length === 0 && insertedMotifs.length === 0}><PanToolAlt fontSize="small" /></ToggleButton>
           </ToggleButtonGroup>
           <Divider orientation="vertical" flexItem sx={{ mx: 0.5 }} />
@@ -3328,6 +3398,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                 const callable = httpsCallable<{ sketchDataUrl: string }, { suggestion: string }>(firebaseFunctions, 'auraAssist')
                 const res = await callable({ sketchDataUrl: snapshot })
                 const suggestion = (res.data?.suggestion || '').trim()
+                console.log('Aura Assist response length:', suggestion.length, 'text:', suggestion.substring(0, 100) + '...')
                 setAuraAssistPopup(prev => ({ ...prev, text: suggestion || 'No suggestion available.' }))
               } catch (err) {
                 const msg = err instanceof Error ? err.message : 'Unable to fetch suggestion.'
@@ -3486,7 +3557,10 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
               left: auraAssistPopup.position.x,
               top: auraAssistPopup.position.y,
               zIndex: 10000,
-              maxWidth: '300px',
+              maxWidth: '350px',
+              maxHeight: '80vh',
+              display: 'flex',
+              flexDirection: 'column',
               background: 'linear-gradient(135deg, rgba(102, 126, 234, 0.95) 0%, rgba(118, 75, 162, 0.95) 100%)',
               backdropFilter: 'blur(10px)',
               borderRadius: '16px',
@@ -3506,7 +3580,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
               },
             }}
           >
-            <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', mb: 1 }}>
+            <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', mb: 1, flexShrink: 0 }}>
               <Typography variant="subtitle2" sx={{ color: 'white', fontWeight: 600, fontSize: '0.9rem' }}>
                 Aura Assist
               </Typography>
@@ -3523,20 +3597,44 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                 <Close fontSize="small" />
               </IconButton>
             </Box>
-            <Typography 
-              variant="body2" 
-              sx={{ 
-                color: 'white', 
-                lineHeight: 1.5, 
-                fontSize: '0.85rem',
-                maxHeight: '200px',
+            <Box
+              sx={{
+                maxHeight: '300px',
                 overflowY: 'auto',
+                overflowX: 'hidden',
                 pr: 0.5,
-                wordBreak: 'break-word'
+                // Custom scrollbar styling
+                '&::-webkit-scrollbar': {
+                  width: '6px',
+                },
+                '&::-webkit-scrollbar-track': {
+                  background: 'rgba(255, 255, 255, 0.1)',
+                  borderRadius: '3px',
+                },
+                '&::-webkit-scrollbar-thumb': {
+                  background: 'rgba(255, 255, 255, 0.3)',
+                  borderRadius: '3px',
+                  '&:hover': {
+                    background: 'rgba(255, 255, 255, 0.5)',
+                  },
+                },
               }}
             >
-              {auraAssistPopup.text}
-            </Typography>
+              <Typography 
+                variant="body2" 
+                component="div"
+                sx={{ 
+                  color: 'white', 
+                  lineHeight: 1.6, 
+                  fontSize: '0.85rem',
+                  wordBreak: 'break-word',
+                  whiteSpace: 'pre-wrap',
+                  display: 'block',
+                }}
+              >
+                {auraAssistPopup.text}
+              </Typography>
+            </Box>
           </Box>
         )}
       </Box>
@@ -3568,9 +3666,11 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                   variant="contained"
                   onClick={handleGenerateClick}
                   disabled={isAIProcessing}
-                  startIcon={isGenerateLoading ? <CircularProgress size={18} color="inherit" /> : <AutoFixHigh sx={{ fontSize: '1rem' }} />}
+                  startIcon={isGenerateLoading ? <CircularProgress size={20} sx={{ color: '#ffffff' }} thickness={4} /> : <AutoFixHigh sx={{ fontSize: '1rem' }} />}
                   sx={{
-                    background: 'linear-gradient(135deg, #2c3e50 0%, #000000 100%)',
+                    background: isGenerateLoading 
+                      ? 'linear-gradient(135deg, #1a252f 0%, #000000 100%)'
+                      : 'linear-gradient(135deg, #2c3e50 0%, #000000 100%)',
                     border: 'none',
                     borderRadius: 3,
                     textTransform: 'none',
@@ -3578,13 +3678,28 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                     fontSize: '0.875rem',
                     py: 2,
                     px: 2,
-                    boxShadow: '0 8px 32px rgba(0, 0, 0, 0.3)',
+                    boxShadow: isGenerateLoading 
+                      ? '0 8px 32px rgba(44, 62, 80, 0.6), 0 0 20px rgba(255, 255, 255, 0.2)'
+                      : '0 8px 32px rgba(0, 0, 0, 0.3)',
                     position: 'relative',
                     overflow: 'hidden',
+                    animation: isGenerateLoading ? 'pulse 2s ease-in-out infinite' : 'none',
+                    '@keyframes pulse': {
+                      '0%, 100%': {
+                        boxShadow: '0 8px 32px rgba(44, 62, 80, 0.6), 0 0 20px rgba(255, 255, 255, 0.2)',
+                      },
+                      '50%': {
+                        boxShadow: '0 8px 32px rgba(44, 62, 80, 0.8), 0 0 30px rgba(255, 255, 255, 0.4)',
+                      },
+                    },
                     '&:hover': {
-                      background: 'linear-gradient(135deg, #1a252f 0%, #000000 100%)',
-                      boxShadow: '0 12px 40px rgba(0, 0, 0, 0.4)',
-                      transform: 'translateY(-2px)',
+                      background: isGenerateLoading 
+                        ? 'linear-gradient(135deg, #1a252f 0%, #000000 100%)'
+                        : 'linear-gradient(135deg, #1a252f 0%, #000000 100%)',
+                      boxShadow: isGenerateLoading
+                        ? '0 12px 40px rgba(44, 62, 80, 0.7), 0 0 25px rgba(255, 255, 255, 0.3)'
+                        : '0 12px 40px rgba(0, 0, 0, 0.4)',
+                      transform: isGenerateLoading ? 'none' : 'translateY(-2px)',
                       transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
                     },
                     '&:active': {
@@ -3602,7 +3717,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                       transition: 'left 0.5s',
                     },
                     '&:hover::before': {
-                      left: '100%',
+                      left: isGenerateLoading ? '-100%' : '100%',
                     },
                     '&.Mui-disabled': {
                       opacity: 0.6,
@@ -3615,11 +3730,19 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                 <Button
                   onClick={handleHarmonizeClick}
                   disabled={isAIProcessing}
-                  startIcon={isHarmonizeLoading ? <CircularProgress size={18} color="inherit" /> : <Settings sx={{ fontSize: '1rem' }} />}
+                  startIcon={isHarmonizeLoading ? <CircularProgress size={20} sx={{ color: theme.palette.mode === 'dark' ? '#ffffff' : '#1976d2' }} thickness={4} /> : <Settings sx={{ fontSize: '1rem' }} />}
                   sx={{
-                    background: 'linear-gradient(135deg, rgba(255,255,255,0.1) 0%, rgba(255,255,255,0.05) 100%)',
+                    background: isHarmonizeLoading
+                      ? theme.palette.mode === 'dark'
+                        ? 'linear-gradient(135deg, rgba(255,255,255,0.2) 0%, rgba(255,255,255,0.1) 100%)'
+                        : 'linear-gradient(135deg, rgba(25, 118, 210, 0.15) 0%, rgba(25, 118, 210, 0.08) 100%)'
+                      : 'linear-gradient(135deg, rgba(255,255,255,0.1) 0%, rgba(255,255,255,0.05) 100%)',
                     backdropFilter: 'blur(10px)',
-                    border: '1px solid rgba(0,0,0,0.1)',
+                    border: isHarmonizeLoading 
+                      ? theme.palette.mode === 'dark'
+                        ? '1px solid rgba(255,255,255,0.3)'
+                        : '2px solid rgba(25, 118, 210, 0.4)'
+                      : '1px solid rgba(0,0,0,0.1)',
                     borderRadius: 3,
                     textTransform: 'none',
                     fontWeight: 600,
@@ -3627,14 +3750,43 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                     py: 2,
                     px: 2,
                     color: 'text.primary',
-                    boxShadow: '0 8px 32px rgba(0,0,0,0.1)',
+                    boxShadow: isHarmonizeLoading
+                      ? theme.palette.mode === 'dark'
+                        ? '0 8px 32px rgba(0,0,0,0.2), 0 0 20px rgba(255, 255, 255, 0.2)'
+                        : '0 8px 32px rgba(25, 118, 210, 0.3), 0 0 25px rgba(25, 118, 210, 0.4)'
+                      : '0 8px 32px rgba(0,0,0,0.1)',
                     position: 'relative',
                     overflow: 'hidden',
+                    animation: isHarmonizeLoading ? 'pulseHarmonize 2s ease-in-out infinite' : 'none',
+                    '@keyframes pulseHarmonize': {
+                      '0%, 100%': {
+                        boxShadow: theme.palette.mode === 'dark'
+                          ? '0 8px 32px rgba(0,0,0,0.2), 0 0 20px rgba(255, 255, 255, 0.2)'
+                          : '0 8px 32px rgba(25, 118, 210, 0.3), 0 0 25px rgba(25, 118, 210, 0.4)',
+                      },
+                      '50%': {
+                        boxShadow: theme.palette.mode === 'dark'
+                          ? '0 8px 32px rgba(0,0,0,0.3), 0 0 30px rgba(255, 255, 255, 0.4)'
+                          : '0 8px 32px rgba(25, 118, 210, 0.5), 0 0 35px rgba(25, 118, 210, 0.6)',
+                      },
+                    },
                     '&:hover': {
-                      background: 'linear-gradient(135deg, rgba(255,255,255,0.2) 0%, rgba(255,255,255,0.1) 100%)',
-                      border: '1px solid rgba(0,0,0,0.15)',
-                      boxShadow: '0 12px 40px rgba(0,0,0,0.15)',
-                      transform: 'translateY(-2px)',
+                      background: isHarmonizeLoading
+                        ? theme.palette.mode === 'dark'
+                          ? 'linear-gradient(135deg, rgba(255,255,255,0.2) 0%, rgba(255,255,255,0.1) 100%)'
+                          : 'linear-gradient(135deg, rgba(25, 118, 210, 0.15) 0%, rgba(25, 118, 210, 0.08) 100%)'
+                        : 'linear-gradient(135deg, rgba(255,255,255,0.2) 0%, rgba(255,255,255,0.1) 100%)',
+                      border: isHarmonizeLoading
+                        ? theme.palette.mode === 'dark'
+                          ? '1px solid rgba(255,255,255,0.3)'
+                          : '2px solid rgba(25, 118, 210, 0.5)'
+                        : '1px solid rgba(0,0,0,0.15)',
+                      boxShadow: isHarmonizeLoading
+                        ? theme.palette.mode === 'dark'
+                          ? '0 12px 40px rgba(0,0,0,0.25), 0 0 25px rgba(255, 255, 255, 0.3)'
+                          : '0 12px 40px rgba(25, 118, 210, 0.4), 0 0 30px rgba(25, 118, 210, 0.5)'
+                        : '0 12px 40px rgba(0,0,0,0.15)',
+                      transform: isHarmonizeLoading ? 'none' : 'translateY(-2px)',
                       transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
                     },
                     '&:active': {
@@ -3652,7 +3804,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                       transition: 'left 0.5s',
                     },
                     '&:hover::before': {
-                      left: '100%',
+                      left: isHarmonizeLoading ? '-100%' : '100%',
                     },
                     '&.Mui-disabled': {
                       opacity: 0.6,
@@ -3960,9 +4112,11 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                   fullWidth
                   variant="contained"
                   onClick={() => {
-                    console.log('Generate with context:', contextText)
-                    // TODO: Implement generation with context
+                    if (contextText.trim()) {
+                      callDesignFunction('generate')
+                    }
                   }}
+                  disabled={!contextText.trim()}
                   sx={(theme) => ({
                     borderRadius: 2,
                     textTransform: 'none',
@@ -3973,29 +4127,46 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                     overflow: 'hidden',
                     ...(theme.palette.mode === 'dark'
                       ? {
-                          backgroundColor: '#000',
-                          color: '#fff',
+                          backgroundColor: contextText.trim() ? '#000' : '#333',
+                          color: contextText.trim() ? '#fff' : '#666',
                           border: '1px solid rgba(255,255,255,0.2)',
-                          boxShadow: '0 4px 16px rgba(0,0,0,0.6)',
+                          boxShadow: contextText.trim() ? '0 4px 16px rgba(0,0,0,0.6)' : '0 2px 8px rgba(0,0,0,0.3)',
                           '&:hover': {
-                            backgroundColor: '#111',
-                            boxShadow: '0 6px 20px rgba(0,0,0,0.7)'
+                            backgroundColor: contextText.trim() ? '#111' : '#333',
+                            boxShadow: contextText.trim() ? '0 6px 20px rgba(0,0,0,0.7)' : '0 2px 8px rgba(0,0,0,0.3)'
+                          },
+                          '&:disabled': {
+                            backgroundColor: '#333',
+                            color: '#666',
+                            border: '1px solid rgba(255,255,255,0.1)'
                           }
                         }
                       : {
-                          background: 'linear-gradient(135deg, #ffffff 0%, #f8f8f8 100%)',
+                          background: contextText.trim() 
+                            ? 'linear-gradient(135deg, #ffffff 0%, #f8f8f8 100%)'
+                            : 'linear-gradient(135deg, #f5f5f5 0%, #e8e8e8 100%)',
                           border: '1px solid rgba(0,0,0,0.1)',
-                          color: 'text.primary',
-                          boxShadow: '0 4px 16px rgba(0,0,0,0.08), 0 1px 4px rgba(0,0,0,0.05)',
+                          color: contextText.trim() ? 'text.primary' : 'text.disabled',
+                          boxShadow: contextText.trim() 
+                            ? '0 4px 16px rgba(0,0,0,0.08), 0 1px 4px rgba(0,0,0,0.05)'
+                            : '0 2px 8px rgba(0,0,0,0.04)',
                           '&:hover': {
-                            background: 'linear-gradient(135deg, #f8f8f8 0%, #f0f0f0 100%)',
-                            boxShadow: '0 6px 20px rgba(0,0,0,0.12), 0 2px 6px rgba(0,0,0,0.08)',
-                            transform: 'translateY(-1px)',
+                            background: contextText.trim() 
+                              ? 'linear-gradient(135deg, #f8f8f8 0%, #f0f0f0 100%)'
+                              : 'linear-gradient(135deg, #f5f5f5 0%, #e8e8e8 100%)',
+                            boxShadow: contextText.trim() 
+                              ? '0 6px 20px rgba(0,0,0,0.12), 0 2px 6px rgba(0,0,0,0.08)'
+                              : '0 2px 8px rgba(0,0,0,0.04)',
+                            transform: contextText.trim() ? 'translateY(-1px)' : 'none',
                             border: '1px solid rgba(0,0,0,0.15)',
                           },
+                          '&:disabled': {
+                            background: 'linear-gradient(135deg, #f5f5f5 0%, #e8e8e8 100%)',
+                            color: 'text.disabled'
+                          }
                         }),
                     '&:active': {
-                      transform: 'translateY(0px)'
+                      transform: contextText.trim() ? 'translateY(0px)' : 'none'
                     },
                     '&::before': {
                       content: '""',
@@ -4008,7 +4179,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                       transition: 'left 0.6s ease-out',
                     },
                     '&:hover::before': {
-                      left: '100%',
+                      left: contextText.trim() ? '100%' : '-100%',
                     },
                     '&::after': {
                       content: '""',
@@ -4023,8 +4194,8 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                       transition: 'width 0.6s ease-out, height 0.6s ease-out',
                     },
                     '&:active::after': {
-                      width: '200px',
-                      height: '200px',
+                      width: contextText.trim() ? '200px' : '0px',
+                      height: contextText.trim() ? '200px' : '0px',
                     }
                   })}
                 >
@@ -4914,9 +5085,11 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                 variant="contained"
                 onClick={handleGenerateClick}
                 disabled={isAIProcessing}
-                startIcon={isGenerateLoading ? <CircularProgress size={18} color="inherit" /> : <AutoFixHigh sx={{ fontSize: '1rem' }} />}
+                startIcon={isGenerateLoading ? <CircularProgress size={20} sx={{ color: '#ffffff' }} thickness={4} /> : <AutoFixHigh sx={{ fontSize: '1rem' }} />}
                 sx={{
-                  background: 'linear-gradient(135deg, #2c3e50 0%, #000000 100%)',
+                  background: isGenerateLoading 
+                    ? 'linear-gradient(135deg, #1a252f 0%, #000000 100%)'
+                    : 'linear-gradient(135deg, #2c3e50 0%, #000000 100%)',
                   border: 'none',
                   borderRadius: 3,
                   textTransform: 'none',
@@ -4924,13 +5097,28 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                   fontSize: '0.875rem',
                   py: 1.5,
                   px: 2,
-                  boxShadow: '0 8px 32px rgba(0, 0, 0, 0.3)',
+                  boxShadow: isGenerateLoading 
+                    ? '0 8px 32px rgba(44, 62, 80, 0.6), 0 0 20px rgba(255, 255, 255, 0.2)'
+                    : '0 8px 32px rgba(0, 0, 0, 0.3)',
                   position: 'relative',
                   overflow: 'hidden',
+                  animation: isGenerateLoading ? 'pulse 2s ease-in-out infinite' : 'none',
+                  '@keyframes pulse': {
+                    '0%, 100%': {
+                      boxShadow: '0 8px 32px rgba(44, 62, 80, 0.6), 0 0 20px rgba(255, 255, 255, 0.2)',
+                    },
+                    '50%': {
+                      boxShadow: '0 8px 32px rgba(44, 62, 80, 0.8), 0 0 30px rgba(255, 255, 255, 0.4)',
+                    },
+                  },
                   '&:hover': {
-                    background: 'linear-gradient(135deg, #1a252f 0%, #000000 100%)',
-                    boxShadow: '0 12px 40px rgba(0, 0, 0, 0.4)',
-                    transform: 'translateY(-2px)',
+                    background: isGenerateLoading 
+                      ? 'linear-gradient(135deg, #1a252f 0%, #000000 100%)'
+                      : 'linear-gradient(135deg, #1a252f 0%, #000000 100%)',
+                    boxShadow: isGenerateLoading
+                      ? '0 12px 40px rgba(44, 62, 80, 0.7), 0 0 25px rgba(255, 255, 255, 0.3)'
+                      : '0 12px 40px rgba(0, 0, 0, 0.4)',
+                    transform: isGenerateLoading ? 'none' : 'translateY(-2px)',
                     transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
                   },
                   '&:active': {
@@ -4948,7 +5136,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                     transition: 'left 0.5s',
                   },
                   '&:hover::before': {
-                    left: '100%',
+                    left: isGenerateLoading ? '-100%' : '100%',
                   },
                   '&.Mui-disabled': {
                     opacity: 0.6,
@@ -4961,25 +5149,62 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
               <Button 
                 onClick={handleHarmonizeClick}
                 disabled={isAIProcessing}
-                startIcon={isHarmonizeLoading ? <CircularProgress size={18} color="inherit" /> : <Settings sx={{ fontSize: '1rem' }} />}
+                startIcon={isHarmonizeLoading ? <CircularProgress size={20} sx={{ color: theme.palette.mode === 'dark' ? '#ffffff' : '#1976d2' }} thickness={4} /> : <Settings sx={{ fontSize: '1rem' }} />}
                 sx={{
-                  background: 'linear-gradient(135deg, rgba(255,255,255,0.1) 0%, rgba(255,255,255,0.05) 100%)',
+                  background: isHarmonizeLoading
+                    ? theme.palette.mode === 'dark'
+                      ? 'linear-gradient(135deg, rgba(255,255,255,0.2) 0%, rgba(255,255,255,0.1) 100%)'
+                      : 'linear-gradient(135deg, rgba(25, 118, 210, 0.15) 0%, rgba(25, 118, 210, 0.08) 100%)'
+                    : 'linear-gradient(135deg, rgba(255,255,255,0.1) 0%, rgba(255,255,255,0.05) 100%)',
                   backdropFilter: 'blur(10px)',
-                  border: '1px solid rgba(0,0,0,0.1)',
+                  border: isHarmonizeLoading 
+                    ? theme.palette.mode === 'dark'
+                      ? '1px solid rgba(255,255,255,0.3)'
+                      : '2px solid rgba(25, 118, 210, 0.4)'
+                    : '1px solid rgba(0,0,0,0.1)',
                   borderRadius: 3,
                   textTransform: 'none',
                   fontWeight: 600,
                   fontSize: '0.875rem',
                   py: 1.5,
                   color: 'text.primary',
-                  boxShadow: '0 8px 32px rgba(0,0,0,0.1)',
+                  boxShadow: isHarmonizeLoading
+                    ? theme.palette.mode === 'dark'
+                      ? '0 8px 32px rgba(0,0,0,0.2), 0 0 20px rgba(255, 255, 255, 0.2)'
+                      : '0 8px 32px rgba(25, 118, 210, 0.3), 0 0 25px rgba(25, 118, 210, 0.4)'
+                    : '0 8px 32px rgba(0,0,0,0.1)',
                   position: 'relative',
                   overflow: 'hidden',
+                  animation: isHarmonizeLoading ? 'pulseHarmonize 2s ease-in-out infinite' : 'none',
+                  '@keyframes pulseHarmonize': {
+                    '0%, 100%': {
+                      boxShadow: theme.palette.mode === 'dark'
+                        ? '0 8px 32px rgba(0,0,0,0.2), 0 0 20px rgba(255, 255, 255, 0.2)'
+                        : '0 8px 32px rgba(25, 118, 210, 0.3), 0 0 25px rgba(25, 118, 210, 0.4)',
+                    },
+                    '50%': {
+                      boxShadow: theme.palette.mode === 'dark'
+                        ? '0 8px 32px rgba(0,0,0,0.3), 0 0 30px rgba(255, 255, 255, 0.4)'
+                        : '0 8px 32px rgba(25, 118, 210, 0.5), 0 0 35px rgba(25, 118, 210, 0.6)',
+                    },
+                  },
                   '&:hover': {
-                    background: 'linear-gradient(135deg, rgba(255,255,255,0.2) 0%, rgba(255,255,255,0.1) 100%)',
-                    border: '1px solid rgba(0,0,0,0.15)',
-                    boxShadow: '0 12px 40px rgba(0,0,0,0.15)',
-                    transform: 'translateY(-2px)',
+                    background: isHarmonizeLoading
+                      ? theme.palette.mode === 'dark'
+                        ? 'linear-gradient(135deg, rgba(255,255,255,0.2) 0%, rgba(255,255,255,0.1) 100%)'
+                        : 'linear-gradient(135deg, rgba(25, 118, 210, 0.15) 0%, rgba(25, 118, 210, 0.08) 100%)'
+                      : 'linear-gradient(135deg, rgba(255,255,255,0.2) 0%, rgba(255,255,255,0.1) 100%)',
+                    border: isHarmonizeLoading
+                      ? theme.palette.mode === 'dark'
+                        ? '1px solid rgba(255,255,255,0.3)'
+                        : '2px solid rgba(25, 118, 210, 0.5)'
+                      : '1px solid rgba(0,0,0,0.15)',
+                    boxShadow: isHarmonizeLoading
+                      ? theme.palette.mode === 'dark'
+                        ? '0 12px 40px rgba(0,0,0,0.25), 0 0 25px rgba(255, 255, 255, 0.3)'
+                        : '0 12px 40px rgba(25, 118, 210, 0.4), 0 0 30px rgba(25, 118, 210, 0.5)'
+                      : '0 12px 40px rgba(0,0,0,0.15)',
+                    transform: isHarmonizeLoading ? 'none' : 'translateY(-2px)',
                     transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
                   },
                   '&:active': {
@@ -4997,7 +5222,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                     transition: 'left 0.5s',
                   },
                   '&:hover::before': {
-                    left: '100%',
+                    left: isHarmonizeLoading ? '-100%' : '100%',
                   },
                   '&.Mui-disabled': {
                     opacity: 0.6,
@@ -5251,9 +5476,11 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                 fullWidth
                 variant="contained"
                 onClick={() => {
-                  console.log('Generate with context:', contextText)
-                  // TODO: Implement generation with context
+                  if (contextText.trim()) {
+                    callDesignFunction('generate')
+                  }
                 }}
+                disabled={!contextText.trim()}
                 sx={(theme) => ({
                   borderRadius: 2,
                   textTransform: 'none',
@@ -5264,29 +5491,46 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                   overflow: 'hidden',
                   ...(theme.palette.mode === 'dark'
                     ? {
-                        backgroundColor: '#000',
-                        color: '#fff',
+                        backgroundColor: contextText.trim() ? '#000' : '#333',
+                        color: contextText.trim() ? '#fff' : '#666',
                         border: '1px solid rgba(255,255,255,0.2)',
-                        boxShadow: '0 4px 16px rgba(0,0,0,0.6)',
+                        boxShadow: contextText.trim() ? '0 4px 16px rgba(0,0,0,0.6)' : '0 2px 8px rgba(0,0,0,0.3)',
                         '&:hover': {
-                          backgroundColor: '#111',
-                          boxShadow: '0 6px 20px rgba(0,0,0,0.7)'
+                          backgroundColor: contextText.trim() ? '#111' : '#333',
+                          boxShadow: contextText.trim() ? '0 6px 20px rgba(0,0,0,0.7)' : '0 2px 8px rgba(0,0,0,0.3)'
+                        },
+                        '&:disabled': {
+                          backgroundColor: '#333',
+                          color: '#666',
+                          border: '1px solid rgba(255,255,255,0.1)'
                         }
                       }
                     : {
-                        background: 'linear-gradient(135deg, #ffffff 0%, #f8f8f8 100%)',
+                        background: contextText.trim() 
+                          ? 'linear-gradient(135deg, #ffffff 0%, #f8f8f8 100%)'
+                          : 'linear-gradient(135deg, #f5f5f5 0%, #e8e8e8 100%)',
                         border: '1px solid rgba(0,0,0,0.1)',
-                        color: 'text.primary',
-                        boxShadow: '0 4px 16px rgba(0,0,0,0.08), 0 1px 4px rgba(0,0,0,0.05)',
+                        color: contextText.trim() ? 'text.primary' : 'text.disabled',
+                        boxShadow: contextText.trim() 
+                          ? '0 4px 16px rgba(0,0,0,0.08), 0 1px 4px rgba(0,0,0,0.05)'
+                          : '0 2px 8px rgba(0,0,0,0.04)',
                         '&:hover': {
-                          background: 'linear-gradient(135deg, #f8f8f8 0%, #f0f0f0 100%)',
-                          boxShadow: '0 6px 20px rgba(0,0,0,0.12), 0 2px 6px rgba(0,0,0,0.08)',
-                          transform: 'translateY(-1px)',
+                          background: contextText.trim() 
+                            ? 'linear-gradient(135deg, #f8f8f8 0%, #f0f0f0 100%)'
+                            : 'linear-gradient(135deg, #f5f5f5 0%, #e8e8e8 100%)',
+                          boxShadow: contextText.trim() 
+                            ? '0 6px 20px rgba(0,0,0,0.12), 0 2px 6px rgba(0,0,0,0.08)'
+                            : '0 2px 8px rgba(0,0,0,0.04)',
+                          transform: contextText.trim() ? 'translateY(-1px)' : 'none',
                           border: '1px solid rgba(0,0,0,0.15)',
                         },
+                        '&:disabled': {
+                          background: 'linear-gradient(135deg, #f5f5f5 0%, #e8e8e8 100%)',
+                          color: 'text.disabled'
+                        }
                       }),
                   '&:active': {
-                    transform: 'translateY(0px)'
+                    transform: contextText.trim() ? 'translateY(0px)' : 'none'
                   },
                   '&::before': {
                     content: '""',
@@ -5299,7 +5543,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                     transition: 'left 0.6s ease-out',
                   },
                   '&:hover::before': {
-                    left: '100%',
+                    left: contextText.trim() ? '100%' : '-100%',
                   },
                   '&::after': {
                     content: '""',
@@ -5314,8 +5558,8 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                     transition: 'width 0.6s ease-out, height 0.6s ease-out',
                   },
                   '&:active::after': {
-                    width: '200px',
-                    height: '200px',
+                    width: contextText.trim() ? '200px' : '0px',
+                    height: contextText.trim() ? '200px' : '0px',
                   }
                 })}
               >
@@ -5920,6 +6164,203 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
           {snackbar?.message}
         </Alert>
       </Snackbar>
+
+      {/* Clear All Confirmation Dialog */}
+      <Dialog
+        open={showClearAllDialog}
+        onClose={() => setShowClearAllDialog(false)}
+        aria-labelledby="clear-all-dialog-title"
+        aria-describedby="clear-all-dialog-description"
+        maxWidth="xs"
+        fullWidth
+      >
+        <DialogTitle id="clear-all-dialog-title" sx={{ pb: 1 }}>
+          Clear All?
+        </DialogTitle>
+        <DialogContent sx={{ pt: 1 }}>
+          <DialogContentText id="clear-all-dialog-description">
+            Are you sure you want to clear all sketches on the canvas?
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions sx={{ px: 3, pb: 2 }}>
+          <Button onClick={() => setShowClearAllDialog(false)} color="primary">
+            Cancel
+          </Button>
+          <Button onClick={clearAll} color="error" variant="contained" autoFocus>
+            Clear All
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Image Library Panel */}
+      <Box sx={{ gridColumn: '1 / -1' }}>
+        <Collapse in={imageLibraryExpanded} timeout={400}>
+          <Box
+            sx={{
+              borderTop: '1px solid',
+              borderColor: 'divider',
+              bgcolor: 'background.paper',
+              display: 'flex',
+              flexDirection: 'column',
+              maxHeight: '150px',
+            }}
+          >
+          {/* Header */}
+          <Box
+            sx={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              px: 1.5,
+              py: 0.75,
+              borderBottom: '1px solid',
+              borderColor: 'divider',
+            }}
+          >
+            <Typography variant="body2" sx={{ fontWeight: 600, fontSize: '0.875rem' }}>
+              Generated Images
+            </Typography>
+            <IconButton
+              size="small"
+              onClick={() => setImageLibraryExpanded(false)}
+              sx={{ ml: 1, p: 0.5 }}
+            >
+              <ExpandMore fontSize="small" />
+            </IconButton>
+          </Box>
+
+          {/* Image Thumbnails */}
+          <Box
+            sx={{
+              flex: 1,
+              overflowX: 'auto',
+              overflowY: 'hidden',
+              px: 1.5,
+              py: 1,
+              display: 'flex',
+              gap: 1.5,
+              '&::-webkit-scrollbar': {
+                height: '6px',
+              },
+              '&::-webkit-scrollbar-track': {
+                background: 'rgba(0, 0, 0, 0.1)',
+                borderRadius: '3px',
+              },
+              '&::-webkit-scrollbar-thumb': {
+                background: 'rgba(0, 0, 0, 0.3)',
+                borderRadius: '3px',
+                '&:hover': {
+                  background: 'rgba(0, 0, 0, 0.5)',
+                },
+              },
+            }}
+          >
+            {generatedImages.length === 0 ? (
+              <Typography
+                variant="body2"
+                color="text.secondary"
+                sx={{ alignSelf: 'center', py: 2, fontSize: '0.8125rem' }}
+              >
+                No images generated yet
+              </Typography>
+            ) : (
+              generatedImages.map((imageUrl, index) => (
+                <Box
+                  key={`${imageUrl}-${index}`}
+                  sx={{
+                    position: 'relative',
+                    flexShrink: 0,
+                    width: 90,
+                    height: 90,
+                    cursor: 'pointer',
+                    borderRadius: 1,
+                    overflow: 'hidden',
+                    border: '2px solid',
+                    borderColor: currentViewImageUrl === imageUrl ? 'primary.main' : 'divider',
+                    transition: 'all 0.2s ease',
+                    '&:hover': {
+                      borderColor: 'primary.main',
+                      transform: 'scale(1.05)',
+                      '& .download-button': {
+                        opacity: 1,
+                      },
+                    },
+                  }}
+                  onClick={() => setCurrentViewImageUrl(imageUrl)}
+                >
+                  <Box
+                    component="img"
+                    src={imageUrl}
+                    alt={`Generated image ${index + 1}`}
+                    sx={{
+                      width: '100%',
+                      height: '100%',
+                      objectFit: 'cover',
+                      display: 'block',
+                    }}
+                    onError={(e) => {
+                      const target = e.target as HTMLImageElement
+                      target.style.display = 'none'
+                    }}
+                  />
+                  {/* Download Button Overlay */}
+                  <IconButton
+                    className="download-button"
+                    size="small"
+                    onClick={(e) => handleDownloadImageFromLibrary(imageUrl, e)}
+                    sx={{
+                      position: 'absolute',
+                      top: 2,
+                      right: 2,
+                      bgcolor: 'background.paper',
+                      opacity: 0,
+                      transition: 'opacity 0.2s ease',
+                      p: 0.5,
+                      '&:hover': {
+                        bgcolor: 'primary.main',
+                        color: 'primary.contrastText',
+                      },
+                    }}
+                  >
+                    <Download sx={{ fontSize: '0.875rem' }} />
+                  </IconButton>
+                </Box>
+              ))
+            )}
+          </Box>
+        </Box>
+        </Collapse>
+      </Box>
+
+      {/* Collapsed Panel Button (when collapsed but images exist) */}
+      <Box sx={{ gridColumn: '1 / -1' }}>
+        <Slide direction="up" in={!imageLibraryExpanded && generatedImages.length > 0} timeout={400}>
+          <Box
+            sx={{
+            borderTop: '1px solid',
+            borderColor: 'divider',
+            bgcolor: 'background.paper',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            px: 1.5,
+            py: 0.5,
+            cursor: 'pointer',
+            '&:hover': {
+              bgcolor: 'action.hover',
+            },
+          }}
+          onClick={() => setImageLibraryExpanded(true)}
+        >
+          <Typography variant="body2" color="text.secondary" sx={{ fontSize: '0.8125rem' }}>
+            {generatedImages.length} generated image{generatedImages.length !== 1 ? 's' : ''}
+          </Typography>
+          <IconButton size="small" sx={{ p: 0.5 }}>
+            <ExpandLess fontSize="small" />
+          </IconButton>
+        </Box>
+        </Slide>
+      </Box>
     </Box>
   )
 }
