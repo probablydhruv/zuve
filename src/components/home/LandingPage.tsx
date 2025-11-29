@@ -118,9 +118,14 @@ export default function LandingPage() {
   return (
     <Box>
               {/* Hero Section */}
-              <Box sx={{ py: { xs: 8, md: 12 }, bgcolor: 'background.default' }}>
-        <Container maxWidth="lg">
-          <Stack direction={{ xs: 'column', md: 'row' }} spacing={6} alignItems="center">
+              <Box sx={{ 
+                py: { xs: 6, sm: 8, md: 10, lg: 12 }, 
+                bgcolor: 'background.default',
+                paddingLeft: { xs: 'env(safe-area-inset-left)', md: 0 },
+                paddingRight: { xs: 'env(safe-area-inset-right)', md: 0 }
+              }}>
+        <Container maxWidth={{ xs: 'sm', sm: 'md', md: 'lg', lg: 'xl' }}>
+          <Stack direction={{ xs: 'column', sm: 'column', md: 'row' }} spacing={{ xs: 4, sm: 5, md: 6 }} alignItems="center">
             <Box sx={{ flex: 1, textAlign: { xs: 'center', md: 'left' } }}>
               <Typography variant="h2" component="h1" gutterBottom sx={{ mb: 3 }}>
                 Design Jewellery

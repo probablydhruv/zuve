@@ -200,16 +200,41 @@ export function handleRequest(
   console.log('Most restrictive remaining:', mostRestrictiveRemaining)
   
   // Calculate allowed with overdraft
-  const baseAllowed = Math.max(0, mostRestrictiveRemaining)
-  const allowedWithOverdraft = baseAllowed + tier.overdraft
-  let allowed = Math.min(requestedN, allowedWithOverdraft)
+  // mostRestrictiveRemaining = quota - used
+  // If positive: within quota, can use remaining + overdraft
+  // If negative but >= -overdraft: in overdraft zone, can use remaining overdraft
+  // If negative and < -overdraft: exceeded quota + overdraft, block completely
+  let allowed: number
+  
+  if (mostRestrictiveRemaining < -tier.overdraft) {
+    // Exceeded quota + overdraft - block completely
+    allowed = 0
+    console.log('Exceeded quota + overdraft - blocking generation')
+  } else if (mostRestrictiveRemaining < 0) {
+    // In overdraft zone (used quota but not all overdraft yet)
+    // Allow only what's left in the overdraft buffer
+    const remainingOverdraft = mostRestrictiveRemaining + tier.overdraft
+    allowed = Math.max(0, Math.min(requestedN, remainingOverdraft))
+    console.log(`In overdraft zone - remaining overdraft: ${remainingOverdraft}, allowed: ${allowed}`)
+  } else {
+    // Within quota - can use remaining quota + full overdraft
+    const allowedWithOverdraft = mostRestrictiveRemaining + tier.overdraft
+    allowed = Math.min(requestedN, allowedWithOverdraft)
+    console.log(`Within quota - allowed with overdraft: ${allowedWithOverdraft}, allowed: ${allowed}`)
+  }
   
   // Trigger cooldown if request exceeds what's available with overdraft
-  if (requestedN > allowedWithOverdraft && tier.cooldownHours > 0) {
-    console.log(`Triggering cooldown: requested ${requestedN} > allowed ${allowedWithOverdraft}`)
+  // Only trigger if we're not already blocking (allowed > 0)
+  if (allowed > 0 && requestedN > allowed && tier.cooldownHours > 0) {
+    console.log(`Triggering cooldown: requested ${requestedN} > allowed ${allowed}`)
     user.cooldownUntil = now + tier.cooldownHours * 3600
-    // Allow up to the quota (no overdraft when triggering cooldown)
-    allowed = Math.max(0, baseAllowed)
+    // Still allow what we calculated, but set cooldown
+  } else if (allowed === 0 && mostRestrictiveRemaining < 0) {
+    // If we're blocking because they've exceeded limits, trigger cooldown
+    if (tier.cooldownHours > 0) {
+      console.log('Blocking due to exceeded limits - triggering cooldown')
+      user.cooldownUntil = now + tier.cooldownHours * 3600
+    }
   }
   
   // Record allowed images as events

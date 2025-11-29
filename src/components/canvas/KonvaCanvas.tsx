@@ -11,7 +11,7 @@ import { httpsCallable } from 'firebase/functions'
 import { FirebaseError } from 'firebase/app'
 import { useThemeMode } from '@/components/providers/ThemeProvider'
 import { useAuth } from '@/components/providers/AuthProvider'
-import UsageBar from './UsageBar'
+import UsageBar, { VersionDisplay } from './UsageBar'
 import { UsageData, handleRequest, getCurrentUsageStatus, TierType } from '@/lib/usageTracker'
 import { InteractiveHoverButton } from '@/components/ui/interactive-hover-button'
 import { functions as firebaseFunctions } from '@/lib/firebaseClient'
@@ -132,7 +132,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
   const [isLoadingCanvas, setIsLoadingCanvas] = useState(true)
   const autoSaveTimeoutRef = useRef<NodeJS.Timeout | null>(null)
   const toolbarRef = useRef<HTMLDivElement>(null)
-  const minZoom = 0.5
+  const minZoom = 1.0
   const maxZoom = 3
 
   // Theme management
@@ -904,19 +904,67 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
       return
     }
 
+    // Validate file size (limit to 10MB to prevent browser freeze)
+    const maxFileSize = 10 * 1024 * 1024 // 10MB
+    if (file.size > maxFileSize) {
+      alert('Image file is too large. Please select an image smaller than 10MB.')
+      return
+    }
+
     const reader = new FileReader()
+    
+    reader.onerror = (error) => {
+      console.error('FileReader error:', error)
+      alert('Failed to read the image file. Please try again.')
+    }
+    
     reader.onload = (e) => {
       const imageUrl = e.target?.result as string
+      if (!imageUrl) {
+        console.error('No image URL from FileReader')
+        alert('Failed to read the image file. Please try again.')
+        return
+      }
+      
       const img = new Image()
       
       img.onload = () => {
+        // Safety check: ensure image has valid dimensions
+        if (!img.width || !img.height || img.width <= 0 || img.height <= 0) {
+          console.error('Invalid image dimensions:', img.width, img.height)
+          alert('Failed to load image: Invalid dimensions')
+          return
+        }
+
         const imageId = `img_${Date.now()}`
+        // Calculate dimensions maintaining aspect ratio
+        const maxDimension = 300
+        const maxSize = Math.max(img.width, img.height)
+        
+        // Safety check: prevent division by zero
+        if (maxSize <= 0) {
+          console.error('Invalid max size:', maxSize)
+          alert('Failed to process image: Invalid dimensions')
+          return
+        }
+        
+        const scale = Math.min(1, maxDimension / maxSize)
+        const width = Math.round(img.width * scale)
+        const height = Math.round(img.height * scale)
+        
+        // Additional safety: ensure minimum dimensions
+        if (width <= 0 || height <= 0) {
+          console.error('Calculated invalid dimensions:', width, height)
+          alert('Failed to process image: Invalid calculated dimensions')
+          return
+        }
+        
         const newImage = {
           id: imageId,
           x: 100,
           y: 100,
-          width: Math.min(img.width, 300), // Max width 300px
-          height: Math.min(img.height, 300), // Max height 300px
+          width,
+          height,
           rotation: 0,
           scaleX: 1,
           scaleY: 1,
@@ -930,7 +978,9 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
           height: img.height,
           naturalWidth: img.naturalWidth,
           naturalHeight: img.naturalHeight,
-          src: img.src.substring(0, 50) + '...'
+          calculatedWidth: width,
+          calculatedHeight: height,
+          scale
         })
         
         setUploadedImages(prev => [...prev, newImage])
@@ -1485,7 +1535,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
         if (savedData) {
           // Restore canvas state
           if (savedData.lines) setLines(savedData.lines)
-          if (savedData.zoom) setZoom(savedData.zoom)
+          if (savedData.zoom) setZoom(Math.max(minZoom, Math.min(maxZoom, savedData.zoom)))
           if (savedData.canvasSize) setCanvasSize(savedData.canvasSize)
           if (savedData.layers) setLayers(savedData.layers)
           // Restore generated images library
@@ -1778,7 +1828,16 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
   // Touch and Apple Pencil support
   const getPointerPosition = (e: any) => {
     const stage = e.target.getStage()
-    const pos = stage.getPointerPosition()
+    const containerPos = stage.getPointerPosition()
+    
+    if (!containerPos) {
+      return { x: 0, y: 0, pressure: 1, tiltX: 0, tiltY: 0, isApplePencil: false }
+    }
+    
+    // Convert container coordinates to stage coordinates
+    // Account for stage position (x, y) and zoom (scale)
+    const stageX = (containerPos.x - stage.x()) / zoom
+    const stageY = (containerPos.y - stage.y()) / zoom
     
     // For Apple Pencil, try to get pressure and tilt information
     if (e.evt && e.evt.pointerType === 'pen') {
@@ -1787,8 +1846,8 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
       const tiltY = e.evt.tiltY || 0
       
       return {
-        x: pos.x,
-        y: pos.y,
+        x: stageX,
+        y: stageY,
         pressure: Math.max(0.1, Math.min(1, pressure)),
         tiltX,
         tiltY,
@@ -1797,8 +1856,8 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
     }
     
     return {
-      x: pos.x,
-      y: pos.y,
+      x: stageX,
+      y: stageY,
       pressure: 1,
       tiltX: 0,
       tiltY: 0,
@@ -2153,21 +2212,60 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
       const currentCenter = getTouchCenter(touches)
       
       if (lastTouchDistance > 0) {
+        const stage = e.target.getStage()
+        if (!stage) return
+        
+        // Get container element to convert screen coordinates to container coordinates
+        const container = stage.container()
+        const containerRect = container.getBoundingClientRect()
+        
+        // Convert current touch center from screen coordinates to container coordinates
+        const currentPointerPos = {
+          x: currentCenter.x - containerRect.left,
+          y: currentCenter.y - containerRect.top
+        }
+        
+        // Convert last touch center from screen coordinates to container coordinates
+        const lastPointerPos = {
+          x: lastTouchCenter.x - containerRect.left,
+          y: lastTouchCenter.y - containerRect.top
+        }
+        
+        // Get current stage position and zoom
+        const oldZoom = zoom
+        const oldStageX = stage.x()
+        const oldStageY = stage.y()
+        
         // Pinch to zoom
         const scale = currentDistance / lastTouchDistance
-        const newZoom = Math.max(minZoom, Math.min(maxZoom, zoom * scale))
-        setZoom(newZoom)
+        const newZoom = Math.max(minZoom, Math.min(maxZoom, oldZoom * scale))
         
-        // Pan based on center movement
-        const stage = e.target.getStage()
-        if (stage) {
-          const dx = currentCenter.x - lastTouchCenter.x
-          const dy = currentCenter.y - lastTouchCenter.y
-          
-          // Apply pan offset
-          stage.x(stage.x() + dx)
-          stage.y(stage.y() + dy)
+        // If zooming out to 100% (minZoom), reset to centered position
+        if (newZoom === minZoom) {
+          setZoom(newZoom)
+          stage.x(0)
+          stage.y(0)
+          setLastTouchDistance(currentDistance)
+          setLastTouchCenter(currentCenter)
+          return
         }
+        
+        // Calculate zoom adjustment: adjust stage position to keep the current pinch center fixed
+        // Formula: newPos = oldPos - (pointerPos - oldPos) * (newZoom - oldZoom) / oldZoom
+        let newStageX = oldStageX - (currentPointerPos.x - oldStageX) * (newZoom - oldZoom) / oldZoom
+        let newStageY = oldStageY - (currentPointerPos.y - oldStageY) * (newZoom - oldZoom) / oldZoom
+        
+        // Also handle panning: adjust for center movement
+        // The pan delta is the difference in center positions, accounting for zoom
+        const panDx = (currentPointerPos.x - lastPointerPos.x)
+        const panDy = (currentPointerPos.y - lastPointerPos.y)
+        newStageX += panDx
+        newStageY += panDy
+        
+        // Update zoom and stage position
+        setZoom(newZoom)
+        stage.x(newStageX)
+        stage.y(newStageY)
       }
       
       setLastTouchDistance(currentDistance)
@@ -2194,6 +2292,57 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
       // Switched from two fingers to one - stop gesturing
       setIsGesturing(false)
       setLastTouchDistance(0)
+    }
+  }
+
+  // Wheel event handler for trackpad pinch-to-zoom
+  const handleWheel = (e: any) => {
+    // Check if this is a pinch gesture (ctrlKey on Windows/Linux, metaKey or ctrlKey on macOS)
+    const isPinchGesture = e.evt.ctrlKey || e.evt.metaKey
+    
+    if (isPinchGesture) {
+      e.evt.preventDefault()
+      
+      const stage = e.target.getStage()
+      if (!stage) return
+      
+      // Get pointer position in container coordinates (unscaled)
+      const pointerPos = stage.getPointerPosition()
+      if (!pointerPos) return
+      
+      // Get current stage position and zoom
+      const oldZoom = zoom
+      const oldStageX = stage.x()
+      const oldStageY = stage.y()
+      
+      // Calculate zoom delta
+      // Negative deltaY = zoom in, positive deltaY = zoom out
+      const zoomSpeed = 0.01 // Adjust this to control zoom sensitivity
+      const zoomDelta = -e.evt.deltaY * zoomSpeed
+      
+      // Calculate new zoom with constraints
+      const newZoom = Math.max(minZoom, Math.min(maxZoom, oldZoom + zoomDelta))
+      
+      // If zoom didn't change, don't update
+      if (newZoom === oldZoom) return
+      
+      // If zooming out to 100% (minZoom), reset to centered position
+      if (newZoom === minZoom) {
+        setZoom(newZoom)
+        stage.x(0)
+        stage.y(0)
+        return
+      }
+      
+      // For zooming in, keep the point under cursor fixed
+      // Formula: newPos = oldPos - (pointerPos - oldPos) * (newZoom - oldZoom) / oldZoom
+      const newStageX = oldStageX - (pointerPos.x - oldStageX) * (newZoom - oldZoom) / oldZoom
+      const newStageY = oldStageY - (pointerPos.y - oldStageY) * (newZoom - oldZoom) / oldZoom
+      
+      // Update zoom and stage position
+      setZoom(newZoom)
+      stage.x(newStageX)
+      stage.y(newStageY)
     }
   }
 
@@ -2382,7 +2531,10 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
         flexDirection: 'column', 
         borderRight: '1px solid', 
         borderColor: 'divider',
-        width: { md: '240px', lg: '260px' }
+        width: { md: '240px', lg: '260px' },
+        overflowY: 'auto',
+        position: 'relative',
+        zIndex: 5
       }}>
         <Box sx={{ p: 2 }}>
           <Typography variant="subtitle2" sx={{ fontWeight: 'bold' }}>Layers</Typography>
@@ -2616,8 +2768,9 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
           </Typography>
         </Box>
         <Divider />
-        <Box sx={{ p: 2 }}>
+        <Box sx={{ p: 2, pb: 2.5, position: 'relative', zIndex: 10 }}>
           <UsageBar usageStatus={usageStatus} />
+          <VersionDisplay />
         </Box>
       </Box>
 
@@ -2665,9 +2818,10 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
           onMouseDown={handlePointerDown}
           onMouseMove={handlePointerMove}
           onMouseUp={handlePointerUp}
-          onTouchStart={handlePointerDown}
-          onTouchMove={handlePointerMove}
-          onTouchEnd={handlePointerUp}
+          onTouchStart={handleTouchStart}
+          onTouchMove={handleTouchMove}
+          onTouchEnd={handleTouchEnd}
+          onWheel={handleWheel}
           onClick={(e) => {
             // Deselect image and motif if clicking on empty space
             if (e.target === e.target.getStage()) {
@@ -5336,6 +5490,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
           <Divider />
           <Box sx={{ p: 2 }}>
             <UsageBar usageStatus={usageStatus} />
+            <VersionDisplay />
           </Box>
         </Box>
       </Drawer>

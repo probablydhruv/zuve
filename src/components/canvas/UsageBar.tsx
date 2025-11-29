@@ -1,9 +1,12 @@
 'use client'
 
-import { Box, Typography, LinearProgress, Tooltip } from '@mui/material'
+import { Box, Typography, LinearProgress, Tooltip, useTheme } from '@mui/material'
 import { Info } from '@mui/icons-material'
 import { UsageStatus } from '@/lib/usageTracker'
 import { useState, useEffect } from 'react'
+
+// Version number - will be updated by GitHub Actions on deployment
+const APP_VERSION = 'v1.06'
 
 interface UsageBarProps {
   usageStatus: UsageStatus
@@ -202,5 +205,31 @@ export default function UsageBar({ usageStatus, onUsageClick }: UsageBarProps) {
         </Box>
       </Box>
     </Box>
+  )
+}
+
+// Version display component - separate from UsageBar
+export function VersionDisplay() {
+  const theme = useTheme()
+  const isDark = theme.palette.mode === 'dark'
+  
+  return (
+    <Typography
+      variant="caption"
+      sx={{
+        fontSize: '0.6rem',
+        color: isDark ? 'rgba(255,255,255,0.5)' : 'rgba(0,0,0,0.4)',
+        fontWeight: 500,
+        letterSpacing: '0.5px',
+        textAlign: 'center',
+        display: 'block',
+        mt: 0.5,
+        mb: 0.5,
+        position: 'relative',
+        zIndex: 1
+      }}
+    >
+      {APP_VERSION}
+    </Typography>
   )
 }

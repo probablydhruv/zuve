@@ -33,7 +33,10 @@ export default function Header() {
       elevation={0}
       sx={{
         bgcolor: theme.palette.background.default,
-        borderBottom: `1px solid ${theme.palette.divider}`
+        borderBottom: `1px solid ${theme.palette.divider}`,
+        paddingTop: { xs: 'env(safe-area-inset-top)', md: 0 },
+        paddingLeft: { xs: 'env(safe-area-inset-left)', md: 0 },
+        paddingRight: { xs: 'env(safe-area-inset-right)', md: 0 }
       }}
     >
       <Toolbar sx={{ gap: 2 }}>
