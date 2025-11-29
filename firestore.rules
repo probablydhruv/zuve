@@ -27,6 +27,11 @@ service cloud.firestore {
       // Tier and subscription can only be updated via Cloud Functions (server-side)
       allow update: if isOwner(userId)
                     && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['tier', 'subscriptionId', 'subscriptionStatus']);
+      
+      // Motifs subcollection (user-based, accessible across all projects)
+      match /motifs/{motifId} {
+        allow read, write: if isOwner(userId);
+      }
     }
     
     // ==================== Project Rules ====================

@@ -45,6 +45,17 @@ export type CanvasData = {
   zoom: number
   canvasSize: { width: number; height: number }
   generatedImages?: string[] // Array of generated/harmonized image URLs
+  insertedMotifs?: any[] // Array of motifs inserted on the canvas
+  motifLayerMap?: { [motifId: string]: string } // Mapping of motif IDs to layer IDs
+  updatedAt: Timestamp | Date
+}
+
+// Motif type
+export type Motif = {
+  id: string
+  name: string
+  data: string // JSON stringified drawing lines
+  createdAt: Timestamp | Date
   updatedAt: Timestamp | Date
 }
 
@@ -61,6 +72,13 @@ export const projectDoc = (userId: string, projectId: string) =>
 
 export const canvasDoc = (userId: string, projectId: string) =>
   doc(db, 'users', userId, 'projects', projectId, 'canvas', 'data')
+
+// Motifs collection helpers (user-based, not project-based)
+export const motifsCollection = (userId: string) =>
+  collection(db, 'users', userId, 'motifs')
+
+export const motifDoc = (userId: string, motifId: string) =>
+  doc(db, 'users', userId, 'motifs', motifId)
 
 // ==================== User Profile Functions ====================
 
@@ -463,6 +481,124 @@ export async function saveCanvasData(
       throw new Error('Permission denied: Check Firestore Security Rules')
     }
     
+    throw error
+  }
+}
+
+// ==================== User Motifs Functions ====================
+
+// Get all motifs for a user
+export async function getUserMotifs(userId: string): Promise<Motif[]> {
+  if (!userId) return []
+  
+  try {
+    const motifsRef = motifsCollection(userId)
+    const motifsSnap = await getDocs(motifsRef)
+    
+    const motifs: Motif[] = []
+    motifsSnap.forEach((doc) => {
+      const data = doc.data()
+      motifs.push({
+        id: doc.id,
+        name: data.name || 'Unnamed Motif',
+        data: data.data || '',
+        createdAt: data.createdAt?.toDate() || new Date(),
+        updatedAt: data.updatedAt?.toDate() || new Date(),
+      })
+    })
+    
+    // Sort by creation date (newest first)
+    motifs.sort((a, b) => {
+      const aDate = a.createdAt instanceof Date ? a.createdAt : (a.createdAt as Timestamp).toDate()
+      const bDate = b.createdAt instanceof Date ? b.createdAt : (b.createdAt as Timestamp).toDate()
+      return bDate.getTime() - aDate.getTime()
+    })
+    
+    console.log(`Loaded ${motifs.length} motifs for user ${userId}`)
+    return motifs
+  } catch (error: any) {
+    console.error('Error fetching user motifs:', error)
+    if (error?.code === 'unavailable') {
+      console.warn('Firestore is unavailable, returning empty array for motifs')
+      return []
+    }
+    if (error?.code === 'permission-denied') {
+      console.error('Permission denied accessing user motifs')
+      return []
+    }
+    return []
+  }
+}
+
+// Save a motif for a user
+export async function saveUserMotif(
+  userId: string,
+  motif: { id: string; name: string; data: string }
+): Promise<void> {
+  if (!userId || !motif.id) {
+    throw new Error('User ID and Motif ID are required')
+  }
+  
+  try {
+    const motifRef = motifDoc(userId, motif.id)
+    await setDoc(motifRef, {
+      name: motif.name,
+      data: motif.data,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    }, { merge: true })
+    
+    console.log('Motif saved successfully:', motif.id, motif.name)
+  } catch (error: any) {
+    console.error('Error saving motif:', error)
+    if (error?.code === 'permission-denied') {
+      throw new Error('Permission denied: Check Firestore Security Rules')
+    }
+    throw error
+  }
+}
+
+// Delete a motif for a user
+export async function deleteUserMotif(userId: string, motifId: string): Promise<void> {
+  if (!userId || !motifId) {
+    throw new Error('User ID and Motif ID are required')
+  }
+  
+  try {
+    const motifRef = motifDoc(userId, motifId)
+    await deleteDoc(motifRef)
+    console.log('Motif deleted successfully:', motifId)
+  } catch (error: any) {
+    console.error('Error deleting motif:', error)
+    if (error?.code === 'permission-denied') {
+      throw new Error('Permission denied: Check Firestore Security Rules')
+    }
+    throw error
+  }
+}
+
+// Update a motif for a user
+export async function updateUserMotif(
+  userId: string,
+  motifId: string,
+  updates: { name?: string; data?: string }
+): Promise<void> {
+  if (!userId || !motifId) {
+    throw new Error('User ID and Motif ID are required')
+  }
+  
+  try {
+    const motifRef = motifDoc(userId, motifId)
+    await updateDoc(motifRef, {
+      ...updates,
+      updatedAt: serverTimestamp(),
+    })
+    console.log('Motif updated successfully:', motifId)
+  } catch (error: any) {
+    console.error('Error updating motif:', error)
+    if (error?.code === 'permission-denied') {
+      throw new Error('Permission denied: Check Firestore Security Rules')
+    }
     throw error
   }
 }

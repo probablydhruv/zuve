@@ -15,7 +15,7 @@ import UsageBar from './UsageBar'
 import { UsageData, handleRequest, getCurrentUsageStatus, TierType } from '@/lib/usageTracker'
 import { InteractiveHoverButton } from '@/components/ui/interactive-hover-button'
 import { functions as firebaseFunctions } from '@/lib/firebaseClient'
-import { getCanvasData, saveCanvasData } from '@/lib/firestore'
+import { getCanvasData, saveCanvasData, getUserMotifs, saveUserMotif, deleteUserMotif, Motif } from '@/lib/firestore'
 
 const STONES = [
   { key: 'none', label: 'None', icon: '⚪' },
@@ -131,6 +131,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
   const [zoom, setZoom] = useState(1)
   const [isLoadingCanvas, setIsLoadingCanvas] = useState(true)
   const autoSaveTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+  const toolbarRef = useRef<HTMLDivElement>(null)
   const minZoom = 0.5
   const maxZoom = 3
 
@@ -234,8 +235,20 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
 
   // Center toolbar when canvas size changes (only if not manually positioned)
   useEffect(() => {
-    if (toolbarCentered) {
-      setToolbarPosition(prev => ({ ...prev, y: 12 }))
+    if (toolbarCentered && toolbarRef.current) {
+      // Use setTimeout to ensure the container is rendered
+      const timeoutId = setTimeout(() => {
+        const container = document.querySelector('[data-canvas-container]') as HTMLElement
+        if (container && toolbarRef.current) {
+          const containerWidth = container.offsetWidth
+          const toolbarWidth = toolbarRef.current.offsetWidth
+          // Calculate exact center position accounting for toolbar width
+          // Position the left edge at: container center - half toolbar width
+          const centerX = (containerWidth - toolbarWidth) / 2
+          setToolbarPosition(prev => ({ ...prev, x: centerX, y: 12 }))
+        }
+      }, 0)
+      return () => clearTimeout(timeoutId)
     }
   }, [canvasSize.width, toolbarCentered])
   
@@ -649,9 +662,18 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
     console.log('Started creating motif')
   }, [])
 
-  const saveMotif = useCallback(() => {
+  const saveMotif = useCallback(async () => {
     if (motifDrawingLines.length === 0) {
       console.log('No drawing to save')
+      return
+    }
+
+    if (!user?.uid) {
+      console.warn('Cannot save motif: User not authenticated')
+      setSnackbar({
+        message: 'Please sign in to save motifs',
+        severity: 'error'
+      })
       return
     }
 
@@ -661,17 +683,79 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
       data: JSON.stringify(motifDrawingLines)
     }
     
-    setMotifs(prev => [...prev, newMotif])
-    setIsCreatingMotif(false)
-    setMotifDrawingLines([])
-    console.log('Saved motif:', newMotif.name)
-  }, [motifDrawingLines, motifs.length])
+    try {
+      // Save to Firestore
+      await saveUserMotif(user.uid, newMotif)
+      
+      // Update local state
+      setMotifs(prev => [...prev, newMotif])
+      setIsCreatingMotif(false)
+      setMotifDrawingLines([])
+      console.log('Saved motif:', newMotif.name)
+      
+      setSnackbar({
+        message: 'Motif saved successfully!',
+        severity: 'success'
+      })
+    } catch (error) {
+      console.error('Error saving motif:', error)
+      setSnackbar({
+        message: 'Failed to save motif. Please try again.',
+        severity: 'error'
+      })
+    }
+  }, [motifDrawingLines, motifs.length, user?.uid])
 
   const cancelMotifCreation = useCallback(() => {
     setIsCreatingMotif(false)
     setMotifDrawingLines([])
     console.log('Cancelled motif creation')
   }, [])
+
+  // Delete a motif from the library
+  const deleteMotifFromLibrary = useCallback(async (motifId: string) => {
+    if (!user?.uid) {
+      console.warn('Cannot delete motif: User not authenticated')
+      setSnackbar({
+        message: 'Please sign in to delete motifs',
+        severity: 'error'
+      })
+      return
+    }
+
+    try {
+      // Delete from Firestore
+      await deleteUserMotif(user.uid, motifId)
+      
+      // Update local state
+      setMotifs(prev => prev.filter(m => m.id !== motifId))
+      
+      // Also remove from canvas if it's inserted
+      setInsertedMotifs(prev => prev.filter(m => m.id !== motifId))
+      setMotifLayerMap(prevMap => {
+        const newMap = { ...prevMap }
+        delete newMap[motifId]
+        return newMap
+      })
+      
+      // Clear selection if this motif was selected
+      if (selectedMotifId === motifId) {
+        setSelectedMotifId(null)
+      }
+      
+      console.log('Deleted motif:', motifId)
+      setSnackbar({
+        message: 'Motif deleted successfully!',
+        severity: 'success'
+      })
+    } catch (error) {
+      console.error('Error deleting motif:', error)
+      setSnackbar({
+        message: 'Failed to delete motif. Please try again.',
+        severity: 'error'
+      })
+    }
+  }, [user?.uid, selectedMotifId])
 
   // Signature Style functions
   const handleSignatureStyleUpload = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
@@ -1414,6 +1498,15 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
             // Try to determine if it's rendered or harmonized based on position
             // For now, just set it as current view
           }
+          // Restore inserted motifs and their layer associations
+          if (savedData.insertedMotifs) {
+            setInsertedMotifs(savedData.insertedMotifs)
+            console.log('Restored inserted motifs:', savedData.insertedMotifs.length)
+          }
+          if (savedData.motifLayerMap) {
+            setMotifLayerMap(savedData.motifLayerMap)
+            console.log('Restored motif layer map:', Object.keys(savedData.motifLayerMap).length, 'mappings')
+          }
           // Note: images need special handling as they need to be loaded as HTMLImageElements
           // We'll handle image restoration separately if needed
         }
@@ -1426,6 +1519,27 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
 
     loadCanvas()
   }, [user?.uid, projectId])
+
+  // Load user motifs from Firestore on mount (user-based, not project-based)
+  useEffect(() => {
+    if (!user?.uid) {
+      setMotifs([])
+      return
+    }
+
+    const loadMotifs = async () => {
+      try {
+        console.log('Loading motifs for user:', user.uid)
+        const userMotifs = await getUserMotifs(user.uid)
+        setMotifs(userMotifs)
+        console.log('Loaded motifs:', userMotifs.length)
+      } catch (error) {
+        console.error('Error loading motifs:', error)
+      }
+    }
+
+    loadMotifs()
+  }, [user?.uid])
 
   // Auto-save canvas data to Firestore
   const autoSaveCanvas = useCallback(() => {
@@ -1465,6 +1579,8 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
           zoom,
           canvasSize,
           generatedImages,
+          insertedMotifs,
+          motifLayerMap,
         })
         console.log('Canvas auto-saved successfully')
       } catch (error: any) {
@@ -1476,7 +1592,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
         })
       }
     }, 2000)
-  }, [user?.uid, projectId, lines, uploadedImages, layers, zoom, canvasSize, generatedImages, isLoadingCanvas])
+  }, [user?.uid, projectId, lines, uploadedImages, layers, zoom, canvasSize, generatedImages, insertedMotifs, motifLayerMap, isLoadingCanvas])
 
   // Auto-save when canvas data changes
   useEffect(() => {
@@ -1488,12 +1604,12 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
     }
     
     // Only trigger auto-save if there's actual content to save
-    if (lines.length === 0 && uploadedImages.length === 0 && generatedImages.length === 0) {
+    if (lines.length === 0 && uploadedImages.length === 0 && generatedImages.length === 0 && insertedMotifs.length === 0) {
       return
     }
     
     autoSaveCanvas()
-  }, [lines, uploadedImages, layers, zoom, canvasSize, autoSaveCanvas, isLoadingCanvas, user?.uid, projectId])
+  }, [lines, uploadedImages, layers, zoom, canvasSize, generatedImages, insertedMotifs, autoSaveCanvas, isLoadingCanvas, user?.uid, projectId])
 
   // Cleanup timeout on unmount
   useEffect(() => {
@@ -2207,8 +2323,11 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
     if (canvasContainer) {
       const containerRect = canvasContainer.getBoundingClientRect()
       const padding = 32 // Account for padding (16px on each side)
-      const newWidth = Math.max(400, containerRect.width - padding)
-      const newHeight = Math.max(300, containerRect.height - padding)
+      // Use viewport-relative minimums: smaller on mobile, larger on desktop
+      const minWidth = Math.min(400, Math.max(280, containerRect.width * 0.9))
+      const minHeight = Math.min(300, Math.max(200, containerRect.height * 0.8))
+      const newWidth = Math.max(minWidth, containerRect.width - padding)
+      const newHeight = Math.max(minHeight, containerRect.height - padding)
       setCanvasSize({ width: newWidth, height: newHeight })
     }
   }, [])
@@ -2245,11 +2364,26 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
       width: '100%',
       overflow: 'hidden',
       display: 'grid', 
-      gridTemplateColumns: { xs: '1fr', md: '260px 1fr 300px' }, 
-      gridTemplateRows: imageLibraryExpanded ? '1fr auto' : '1fr'
+      gridTemplateColumns: { 
+        xs: '1fr', 
+        sm: '1fr', 
+        md: '240px 1fr 280px',
+        lg: '260px 1fr 300px'
+      }, 
+      gridTemplateRows: imageLibraryExpanded ? '1fr auto' : '1fr',
+      // Safe area insets for notched devices
+      paddingLeft: { xs: 'env(safe-area-inset-left)', md: 0 },
+      paddingRight: { xs: 'env(safe-area-inset-right)', md: 0 },
+      paddingTop: { xs: 'env(safe-area-inset-top)', md: 0 }
     }}>
       {/* Left Sidebar */}
-      <Box sx={{ display: { xs: 'none', md: 'flex' }, flexDirection: 'column', borderRight: '1px solid', borderColor: 'divider' }}>
+      <Box sx={{ 
+        display: { xs: 'none', sm: 'none', md: 'flex' }, 
+        flexDirection: 'column', 
+        borderRight: '1px solid', 
+        borderColor: 'divider',
+        width: { md: '240px', lg: '260px' }
+      }}>
         <Box sx={{ p: 2 }}>
           <Typography variant="subtitle2" sx={{ fontWeight: 'bold' }}>Layers</Typography>
         </Box>
@@ -3255,16 +3389,15 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
 
         {/* Floating top toolbar */}
         <Box 
+          ref={toolbarRef}
           data-floating-toolbar
           onMouseDown={handleToolbarMouseDown}
           onTouchStart={handleToolbarTouchStart}
           sx={{ 
             position: 'absolute', 
             top: toolbarPosition.y, 
-            left: toolbarCentered ? '50%' : toolbarPosition.x,
-            transform: toolbarCentered 
-              ? `translateX(-50%) ${isDragging ? 'none' : 'translateY(-1px)'}`
-              : isDragging ? 'none' : 'translateY(-1px)',
+            left: `${toolbarPosition.x}px`,
+            transform: isDragging ? 'none' : 'translateY(-1px)',
             bgcolor: 'background.paper', 
             border: '1px solid', 
             borderColor: 'divider', 
@@ -3277,7 +3410,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
             gap: 0.5,
             cursor: isDragging ? 'grabbing' : 'grab',
             userSelect: 'none',
-            transition: isDragging ? 'none' : 'all 0.2s ease-out',
+            transition: isDragging ? 'none' : 'box-shadow 0.2s ease-out, transform 0.2s ease-out',
             '&:hover': {
               boxShadow: '0 8px 24px rgba(0,0,0,0.12)',
             }
@@ -3287,9 +3420,27 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
           <Tooltip title="Undo (Cmd+Z / Ctrl+Z)"><span><IconButton size="small" onClick={(e) => { e.stopPropagation(); e.preventDefault(); console.log('Undo button clicked'); undo(); }} disabled={historyIndex <= 0}><Undo fontSize="small" /></IconButton></span></Tooltip>
           <Tooltip title="Redo (Cmd+Shift+Z / Ctrl+Y)"><span><IconButton size="small" onClick={(e) => { e.stopPropagation(); redo(); }} disabled={historyIndex >= history.length - 1}><Redo fontSize="small" /></IconButton></span></Tooltip>
           <Divider orientation="vertical" flexItem sx={{ mx: 0.5 }} />
-          <Tooltip title="Zoom Out"><span><IconButton size="small" onClick={(e) => { e.stopPropagation(); setZoom(z => Math.max(minZoom, +(z - 0.1).toFixed(2))); }}><ZoomOut fontSize="small" /></IconButton></span></Tooltip>
+          <Tooltip title="Zoom Out"><span><IconButton 
+            size="small" 
+            onClick={(e) => { e.stopPropagation(); setZoom(z => Math.max(minZoom, +(z - 0.1).toFixed(2))); }}
+            sx={{
+              minWidth: { xs: 44, md: 'auto' },
+              minHeight: { xs: 44, md: 'auto' },
+              width: { xs: 44, md: 'auto' },
+              height: { xs: 44, md: 'auto' }
+            }}
+          ><ZoomOut fontSize="small" /></IconButton></span></Tooltip>
           <Typography variant="caption" sx={{ minWidth: 40, textAlign: 'center' }}>{Math.round(zoom * 100)}%</Typography>
-          <Tooltip title="Zoom In"><span><IconButton size="small" onClick={(e) => { e.stopPropagation(); setZoom(z => Math.min(maxZoom, +(z + 0.1).toFixed(2))); }}><ZoomIn fontSize="small" /></IconButton></span></Tooltip>
+          <Tooltip title="Zoom In"><span><IconButton 
+            size="small" 
+            onClick={(e) => { e.stopPropagation(); setZoom(z => Math.min(maxZoom, +(z + 0.1).toFixed(2))); }}
+            sx={{
+              minWidth: { xs: 44, md: 'auto' },
+              minHeight: { xs: 44, md: 'auto' },
+              width: { xs: 44, md: 'auto' },
+              height: { xs: 44, md: 'auto' }
+            }}
+          ><ZoomIn fontSize="small" /></IconButton></span></Tooltip>
           <Divider orientation="vertical" flexItem sx={{ mx: 0.5 }} />
           <ToggleButtonGroup exclusive size="small" value={tool} onChange={(_, v) => v && setTool(v)} onClick={(e) => e.stopPropagation()}>
             <ToggleButton value="brush"><Gesture fontSize="small" /></ToggleButton>
@@ -3302,8 +3453,10 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
               size="small" 
               onClick={(e) => e.stopPropagation()}
               sx={{ 
-                width: 32, 
-                height: 32, 
+                width: { xs: 44, md: 32 }, 
+                height: { xs: 44, md: 32 }, 
+                minWidth: { xs: 44, md: 32 },
+                minHeight: { xs: 44, md: 32 },
                 borderRadius: '50%', 
                 border: '2px solid', 
                 borderColor: 'divider',
@@ -3332,26 +3485,111 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
             </IconButton>
           </span></Tooltip>
           <Divider orientation="vertical" flexItem sx={{ mx: 0.5 }} />
-          <Tooltip title="Select Area"><span><IconButton size="small" color="info" onClick={(e) => { e.stopPropagation(); startSelectionMode(); }} sx={{ bgcolor: selectionMode ? 'info.dark' : 'info.main', color: 'white', '&:hover': { bgcolor: 'info.dark' } }}><ContentCut fontSize="small" /></IconButton></span></Tooltip>
+          <Tooltip title="Select Area"><span><IconButton 
+            size="small" 
+            color="info" 
+            onClick={(e) => { e.stopPropagation(); startSelectionMode(); }} 
+            sx={{ 
+              bgcolor: selectionMode ? 'info.dark' : 'info.main', 
+              color: 'white', 
+              '&:hover': { bgcolor: 'info.dark' },
+              minWidth: { xs: 44, md: 'auto' },
+              minHeight: { xs: 44, md: 'auto' },
+              width: { xs: 44, md: 'auto' },
+              height: { xs: 44, md: 'auto' }
+            }}
+          ><ContentCut fontSize="small" /></IconButton></span></Tooltip>
           {selectedImageId && !cropMode && !selectionMode && (
             <>
               <Divider orientation="vertical" flexItem sx={{ mx: 0.5 }} />
-              <Tooltip title="Replicate Image"><span><IconButton size="small" color="secondary" onClick={(e) => { e.stopPropagation(); replicateSelectedImage(); }}><ContentCopy fontSize="small" /></IconButton></span></Tooltip>
-              <Tooltip title="Crop Image"><span><IconButton size="small" color="warning" onClick={(e) => { e.stopPropagation(); cropSelectedImage(); }}><Crop fontSize="small" /></IconButton></span></Tooltip>
+              <Tooltip title="Replicate Image"><span><IconButton 
+                size="small" 
+                color="secondary" 
+                onClick={(e) => { e.stopPropagation(); replicateSelectedImage(); }}
+                sx={{
+                  minWidth: { xs: 44, md: 'auto' },
+                  minHeight: { xs: 44, md: 'auto' },
+                  width: { xs: 44, md: 'auto' },
+                  height: { xs: 44, md: 'auto' }
+                }}
+              ><ContentCopy fontSize="small" /></IconButton></span></Tooltip>
+              <Tooltip title="Crop Image"><span><IconButton 
+                size="small" 
+                color="warning" 
+                onClick={(e) => { e.stopPropagation(); cropSelectedImage(); }}
+                sx={{
+                  minWidth: { xs: 44, md: 'auto' },
+                  minHeight: { xs: 44, md: 'auto' },
+                  width: { xs: 44, md: 'auto' },
+                  height: { xs: 44, md: 'auto' }
+                }}
+              ><Crop fontSize="small" /></IconButton></span></Tooltip>
             </>
           )}
           {cropMode && (
             <>
               <Divider orientation="vertical" flexItem sx={{ mx: 0.5 }} />
-              <Tooltip title="Apply Crop"><span><IconButton size="small" color="success" onClick={(e) => { e.stopPropagation(); applyCrop(); }} sx={{ bgcolor: 'success.main', color: 'white', '&:hover': { bgcolor: 'success.dark' } }}>✓</IconButton></span></Tooltip>
-              <Tooltip title="Cancel Crop"><span><IconButton size="small" color="error" onClick={(e) => { e.stopPropagation(); cancelCrop(); }} sx={{ bgcolor: 'error.main', color: 'white', '&:hover': { bgcolor: 'error.dark' } }}>✕</IconButton></span></Tooltip>
+              <Tooltip title="Apply Crop"><span><IconButton 
+                size="small" 
+                color="success" 
+                onClick={(e) => { e.stopPropagation(); applyCrop(); }} 
+                sx={{ 
+                  bgcolor: 'success.main', 
+                  color: 'white', 
+                  '&:hover': { bgcolor: 'success.dark' },
+                  minWidth: { xs: 44, md: 'auto' },
+                  minHeight: { xs: 44, md: 'auto' },
+                  width: { xs: 44, md: 'auto' },
+                  height: { xs: 44, md: 'auto' }
+                }}
+              >✓</IconButton></span></Tooltip>
+              <Tooltip title="Cancel Crop"><span><IconButton 
+                size="small" 
+                color="error" 
+                onClick={(e) => { e.stopPropagation(); cancelCrop(); }} 
+                sx={{ 
+                  bgcolor: 'error.main', 
+                  color: 'white', 
+                  '&:hover': { bgcolor: 'error.dark' },
+                  minWidth: { xs: 44, md: 'auto' },
+                  minHeight: { xs: 44, md: 'auto' },
+                  width: { xs: 44, md: 'auto' },
+                  height: { xs: 44, md: 'auto' }
+                }}
+              >✕</IconButton></span></Tooltip>
             </>
           )}
           {selectionMode && (
             <>
               <Divider orientation="vertical" flexItem sx={{ mx: 0.5 }} />
-              <Tooltip title="Apply Selection"><span><IconButton size="small" color="success" onClick={(e) => { e.stopPropagation(); applySelection(); }} sx={{ bgcolor: 'success.main', color: 'white', '&:hover': { bgcolor: 'success.dark' } }}>✓</IconButton></span></Tooltip>
-              <Tooltip title="Cancel Selection"><span><IconButton size="small" color="error" onClick={(e) => { e.stopPropagation(); cancelSelection(); }} sx={{ bgcolor: 'error.main', color: 'white', '&:hover': { bgcolor: 'error.dark' } }}>✕</IconButton></span></Tooltip>
+              <Tooltip title="Apply Selection"><span><IconButton 
+                size="small" 
+                color="success" 
+                onClick={(e) => { e.stopPropagation(); applySelection(); }} 
+                sx={{ 
+                  bgcolor: 'success.main', 
+                  color: 'white', 
+                  '&:hover': { bgcolor: 'success.dark' },
+                  minWidth: { xs: 44, md: 'auto' },
+                  minHeight: { xs: 44, md: 'auto' },
+                  width: { xs: 44, md: 'auto' },
+                  height: { xs: 44, md: 'auto' }
+                }}
+              >✓</IconButton></span></Tooltip>
+              <Tooltip title="Cancel Selection"><span><IconButton 
+                size="small" 
+                color="error" 
+                onClick={(e) => { e.stopPropagation(); cancelSelection(); }} 
+                sx={{ 
+                  bgcolor: 'error.main', 
+                  color: 'white', 
+                  '&:hover': { bgcolor: 'error.dark' },
+                  minWidth: { xs: 44, md: 'auto' },
+                  minHeight: { xs: 44, md: 'auto' },
+                  width: { xs: 44, md: 'auto' },
+                  height: { xs: 44, md: 'auto' }
+                }}
+              >✕</IconButton></span></Tooltip>
             </>
           )}
           {/* Theme Toggle - Desktop/Tablet Only */}
@@ -3643,7 +3881,13 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
       </Box>
 
       {/* Right Sidebar */}
-      <Box sx={{ display: { xs: 'none', md: 'flex' }, flexDirection: 'column', borderLeft: '1px solid', borderColor: 'divider' }}>
+      <Box sx={{ 
+        display: { xs: 'none', sm: 'none', md: 'flex' }, 
+        flexDirection: 'column', 
+        borderLeft: '1px solid', 
+        borderColor: 'divider',
+        width: { md: '280px', lg: '300px' }
+      }}>
         {/* Tab Navigation */}
         <Box sx={{ display: 'flex', borderBottom: '1px solid', borderColor: 'divider', p: 0.5, gap: 0.5 }}>
           <InteractiveHoverButton
@@ -4423,11 +4667,15 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                           alignItems: 'center',
                           justifyContent: 'center',
                           cursor: 'pointer',
+                          position: 'relative',
                           transition: 'all 0.2s ease',
                           '&:hover': {
                             borderColor: 'primary.main',
                             backgroundColor: 'action.hover',
-                            transform: 'scale(1.05)'
+                            transform: 'scale(1.05)',
+                            '& .delete-motif-button': {
+                              opacity: 1
+                            }
                           }
                         }}
                         onClick={() => {
@@ -4436,6 +4684,33 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                         }}
                       >
                         {renderMotifPreview(motif)}
+                        <IconButton
+                          className="delete-motif-button"
+                          size="small"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            if (confirm(`Delete "${motif.name}"?`)) {
+                              deleteMotifFromLibrary(motif.id)
+                            }
+                          }}
+                          sx={{
+                            position: 'absolute',
+                            top: 4,
+                            right: 4,
+                            opacity: 0,
+                            transition: 'opacity 0.2s ease',
+                            backgroundColor: 'error.main',
+                            color: 'white',
+                            width: 24,
+                            height: 24,
+                            '&:hover': {
+                              backgroundColor: 'error.dark',
+                              opacity: 1
+                            }
+                          }}
+                        >
+                          <Delete sx={{ fontSize: '0.875rem' }} />
+                        </IconButton>
                       </Box>
                     ))}
                   </Box>
@@ -4825,9 +5100,17 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
         anchor="left" 
         open={leftDrawerOpen} 
         onClose={() => setLeftDrawerOpen(false)}
-        sx={{ display: { xs: 'block', md: 'none' } }}
+        sx={{ display: { xs: 'block', sm: 'block', md: 'none' } }}
       >
-        <Box sx={{ width: 260, height: '100%', display: 'flex', flexDirection: 'column' }}>
+        <Box sx={{ 
+          width: { xs: '85vw', sm: 300 }, 
+          maxWidth: '90vw',
+          height: '100%', 
+          display: 'flex', 
+          flexDirection: 'column',
+          paddingBottom: 'env(safe-area-inset-bottom)',
+          paddingLeft: 'env(safe-area-inset-left)'
+        }}>
           <Box sx={{ p: 2 }}>
             <Typography variant="subtitle2" sx={{ fontWeight: 'bold' }}>Layers</Typography>
           </Box>
@@ -5062,9 +5345,17 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
         anchor="right" 
         open={rightDrawerOpen} 
         onClose={() => setRightDrawerOpen(false)}
-        sx={{ display: { xs: 'block', md: 'none' } }}
+        sx={{ display: { xs: 'block', sm: 'block', md: 'none' } }}
       >
-        <Box sx={{ width: 300, height: '100%', display: 'flex', flexDirection: 'column' }}>
+        <Box sx={{ 
+          width: { xs: '85vw', sm: 300 }, 
+          maxWidth: '90vw',
+          height: '100%', 
+          display: 'flex', 
+          flexDirection: 'column',
+          paddingBottom: 'env(safe-area-inset-bottom)',
+          paddingRight: 'env(safe-area-inset-right)'
+        }}>
           {/* Mobile Tab Navigation */}
           <Box sx={{ display: 'flex', borderBottom: '1px solid', borderColor: 'divider', p: 0.5, gap: 0.5 }}>
             <InteractiveHoverButton
@@ -5787,11 +6078,15 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                           alignItems: 'center',
                           justifyContent: 'center',
                           cursor: 'pointer',
+                          position: 'relative',
                           transition: 'all 0.2s ease',
                           '&:hover': {
                             borderColor: 'primary.main',
                             backgroundColor: 'action.hover',
-                            transform: 'scale(1.05)'
+                            transform: 'scale(1.05)',
+                            '& .delete-motif-button': {
+                              opacity: 1
+                            }
                           }
                         }}
                         onClick={() => {
@@ -5800,6 +6095,33 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                         }}
                       >
                         {renderMotifPreview(motif)}
+                        <IconButton
+                          className="delete-motif-button"
+                          size="small"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            if (confirm(`Delete "${motif.name}"?`)) {
+                              deleteMotifFromLibrary(motif.id)
+                            }
+                          }}
+                          sx={{
+                            position: 'absolute',
+                            top: 4,
+                            right: 4,
+                            opacity: 0,
+                            transition: 'opacity 0.2s ease',
+                            backgroundColor: 'error.main',
+                            color: 'white',
+                            width: 24,
+                            height: 24,
+                            '&:hover': {
+                              backgroundColor: 'error.dark',
+                              opacity: 1
+                            }
+                          }}
+                        >
+                          <Delete sx={{ fontSize: '0.875rem' }} />
+                        </IconButton>
                       </Box>
                     ))}
                   </Box>
@@ -6126,10 +6448,12 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
         color="primary"
         sx={{ 
           position: 'fixed', 
-          bottom: 16, 
-          left: 16, 
-          display: { xs: 'flex', md: 'none' },
-          zIndex: 1000
+          bottom: { xs: 'max(16px, calc(16px + env(safe-area-inset-bottom)))', md: 16 }, 
+          left: { xs: 'max(16px, calc(16px + env(safe-area-inset-left)))', md: 16 }, 
+          display: { xs: 'flex', sm: 'flex', md: 'none' },
+          zIndex: 1000,
+          minWidth: { xs: 48, md: 56 },
+          minHeight: { xs: 48, md: 56 }
         }}
         onClick={() => setLeftDrawerOpen(true)}
       >
@@ -6139,10 +6463,12 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
         color="secondary"
         sx={{ 
           position: 'fixed', 
-          bottom: 16, 
-          right: 16, 
-          display: { xs: 'flex', md: 'none' },
-          zIndex: 1000
+          bottom: { xs: 'max(16px, calc(16px + env(safe-area-inset-bottom)))', md: 16 }, 
+          right: { xs: 'max(16px, calc(16px + env(safe-area-inset-right)))', md: 16 }, 
+          display: { xs: 'flex', sm: 'flex', md: 'none' },
+          zIndex: 1000,
+          minWidth: { xs: 48, md: 56 },
+          minHeight: { xs: 48, md: 56 }
         }}
         onClick={() => setRightDrawerOpen(true)}
       >
@@ -6157,6 +6483,9 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
           setSnackbar(null)
         }}
         anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+        sx={{
+          bottom: { xs: 'max(24px, env(safe-area-inset-bottom))', md: 24 }
+        }}
       >
         <Alert
           onClose={() => setSnackbar(null)}
@@ -6176,6 +6505,12 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
         aria-describedby="clear-all-dialog-description"
         maxWidth="xs"
         fullWidth
+        PaperProps={{
+          sx: {
+            margin: { xs: 'env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)', md: '32px' },
+            maxWidth: { xs: 'calc(100% - env(safe-area-inset-left) - env(safe-area-inset-right))', md: 'xs' }
+          }
+        }}
       >
         <DialogTitle id="clear-all-dialog-title" sx={{ pb: 1 }}>
           Clear All?
@@ -6206,6 +6541,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
               display: 'flex',
               flexDirection: 'column',
               maxHeight: '150px',
+              paddingBottom: { xs: 'env(safe-area-inset-bottom)', md: 0 }
             }}
           >
           {/* Header */}
@@ -6273,8 +6609,8 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                   sx={{
                     position: 'relative',
                     flexShrink: 0,
-                    width: 90,
-                    height: 90,
+                    width: { xs: 70, sm: 80, md: 90, lg: 100 },
+                    height: { xs: 70, sm: 80, md: 90, lg: 100 },
                     cursor: 'pointer',
                     borderRadius: 1,
                     overflow: 'hidden',
@@ -6349,6 +6685,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
             px: 1.5,
             py: 0.5,
             cursor: 'pointer',
+            paddingBottom: { xs: 'max(0.5rem, env(safe-area-inset-bottom))', md: 0.5 },
             '&:hover': {
               bgcolor: 'action.hover',
             },
