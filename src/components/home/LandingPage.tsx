@@ -124,7 +124,7 @@ export default function LandingPage() {
                 paddingLeft: { xs: 'env(safe-area-inset-left)', md: 0 },
                 paddingRight: { xs: 'env(safe-area-inset-right)', md: 0 }
               }}>
-        <Container maxWidth={{ xs: 'sm', sm: 'md', md: 'lg', lg: 'xl' }}>
+        <Container maxWidth="xl">
           <Stack direction={{ xs: 'column', sm: 'column', md: 'row' }} spacing={{ xs: 4, sm: 5, md: 6 }} alignItems="center">
             <Box sx={{ flex: 1, textAlign: { xs: 'center', md: 'left' } }}>
               <Typography variant="h2" component="h1" gutterBottom sx={{ mb: 3 }}>
