@@ -1059,7 +1059,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                   console.log('Using compressed data URL for storage')
                 } else {
                   console.warn('Image too large even after compression, cannot persist')
-                  setSnackbar({ message: 'Image is too large to save. Please use a smaller image.', severity: 'warning' })
+                  setSnackbar({ message: 'Image is too large to save. Please use a smaller image.', severity: 'error' })
                 }
               } catch (compressError) {
                 console.error('Failed to compress image:', compressError)

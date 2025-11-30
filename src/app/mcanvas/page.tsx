@@ -19,7 +19,6 @@ function MobileCanvasPageContent() {
       const userAgent = navigator.userAgent
       const isMobileDevice = /Android|webOS|iPhone|iPod|BlackBerry|IEMobile|Opera Mini/i.test(userAgent)
       const isTablet = /iPad|Android(?=.*\bMobile\b)/i.test(userAgent)
-      const isSmallScreen = window.innerWidth < 768
       
       // For testing: also check if we're in mobile viewport or force parameter
       const isMobileViewport = window.innerWidth < 768
