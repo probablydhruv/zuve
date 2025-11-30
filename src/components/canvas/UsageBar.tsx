@@ -6,7 +6,7 @@ import { UsageStatus } from '@/lib/usageTracker'
 import { useState, useEffect } from 'react'
 
 // Version number - will be updated by GitHub Actions on deployment
-const APP_VERSION = 'v1.06'
+const APP_VERSION = 'v1.07'
 
 interface UsageBarProps {
   usageStatus: UsageStatus

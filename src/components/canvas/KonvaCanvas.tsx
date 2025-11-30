@@ -3,7 +3,7 @@
 import { useRef, useState, useEffect, useCallback } from 'react'
 import { Stage, Layer, Line, Image as KonvaImage, Transformer, Rect, Group, Text, Circle } from 'react-konva'
 import { Box, Slider, ToggleButton, ToggleButtonGroup, Button, Divider, Typography, IconButton, Menu, MenuItem, Tooltip, List, ListItem, ListItemText, ListItemSecondaryAction, ButtonGroup, Card, CardActionArea, CardContent as MUICardContent, Drawer, Fab, TextField, Checkbox, CircularProgress, Snackbar, Alert, Dialog, DialogTitle, DialogContent, DialogContentText, DialogActions, Collapse, Slide } from '@mui/material'
-import { Add, Delete, Visibility, VisibilityOff, Undo, Redo, ZoomIn, ZoomOut, PanToolAlt, Gesture, Layers as LayersIcon, Settings, AutoFixHigh, Close, Campaign, ContentCopy, Crop, ContentCut, Info, DesignServices, SettingsSuggest, SwapHoriz, Download, DeleteSweep, ExpandMore, ExpandLess } from '@mui/icons-material'
+import { Add, Delete, Visibility, VisibilityOff, Undo, Redo, ZoomIn, ZoomOut, PanToolAlt, Gesture, Layers as LayersIcon, Settings, AutoFixHigh, Close, Campaign, ContentCopy, Crop, ContentCut, DesignServices, SettingsSuggest, SwapHoriz, Download, DeleteSweep, ExpandMore, ExpandLess } from '@mui/icons-material'
 import { LightMode, DarkMode } from '@mui/icons-material'
 import { Eraser } from 'lucide-react'
 import { useTheme } from '@mui/material/styles'
@@ -2692,11 +2692,18 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
           />
           <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mt: 2, mb: 1 }}>
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
-              <Typography variant="subtitle2">Canvas Influence</Typography>
               <Tooltip title="Sets how much the AI should stick to your sketch. 100% follows it exactly, lower percentages allow more AI interpretation.">
-                <IconButton size="small" sx={{ p: 0.25, color: 'text.secondary' }}>
-                  <Info sx={{ fontSize: '0.875rem' }} />
-                </IconButton>
+                <Typography 
+                  variant="subtitle2" 
+                  sx={{ 
+                    textDecoration: 'underline',
+                    textDecorationStyle: 'dotted',
+                    textDecorationColor: 'rgba(0, 0, 0, 0.5)',
+                    cursor: 'help'
+                  }}
+                >
+                  Canvas Influence
+                </Typography>
               </Tooltip>
             </Box>
             <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 'bold' }}>
@@ -5412,11 +5419,17 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
             />
             <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mt: 2, mb: 1 }}>
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
-                <Typography variant="subtitle2">Canvas Influence</Typography>
                 <Tooltip title="Sets how much the AI should stick to your sketch. 100% follows it exactly, lower percentages allow more AI interpretation.">
-                  <IconButton size="small" sx={{ p: 0.25, color: 'text.secondary' }}>
-                    <Info sx={{ fontSize: '0.875rem' }} />
-                  </IconButton>
+                  <Typography 
+                    variant="subtitle2" 
+                    sx={{ 
+                      textDecoration: 'underline',
+                      textDecorationStyle: 'dotted',
+                      cursor: 'help'
+                    }}
+                  >
+                    Canvas Influence
+                  </Typography>
                 </Tooltip>
               </Box>
               <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 'bold' }}>
@@ -6600,7 +6613,6 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
 
       {/* Mobile Floating Action Buttons */}
       <Fab
-        color="primary"
         sx={{ 
           position: 'fixed', 
           bottom: { xs: 'max(16px, calc(16px + env(safe-area-inset-bottom)))', md: 16 }, 
@@ -6608,14 +6620,22 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
           display: { xs: 'flex', sm: 'flex', md: 'none' },
           zIndex: 1000,
           minWidth: { xs: 48, md: 56 },
-          minHeight: { xs: 48, md: 56 }
+          minHeight: { xs: 48, md: 56 },
+          bgcolor: theme.palette.mode === 'light' 
+            ? 'rgba(0, 0, 0, 0.08)' 
+            : 'rgba(255, 255, 255, 0.12)',
+          color: theme.palette.text.primary,
+          '&:hover': {
+            bgcolor: theme.palette.mode === 'light' 
+              ? 'rgba(0, 0, 0, 0.12)' 
+              : 'rgba(255, 255, 255, 0.18)'
+          }
         }}
         onClick={() => setLeftDrawerOpen(true)}
       >
         <LayersIcon />
       </Fab>
       <Fab
-        color="secondary"
         sx={{ 
           position: 'fixed', 
           bottom: { xs: 'max(16px, calc(16px + env(safe-area-inset-bottom)))', md: 16 }, 
@@ -6623,7 +6643,16 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
           display: { xs: 'flex', sm: 'flex', md: 'none' },
           zIndex: 1000,
           minWidth: { xs: 48, md: 56 },
-          minHeight: { xs: 48, md: 56 }
+          minHeight: { xs: 48, md: 56 },
+          bgcolor: theme.palette.mode === 'light' 
+            ? 'rgba(0, 0, 0, 0.08)' 
+            : 'rgba(255, 255, 255, 0.12)',
+          color: theme.palette.text.primary,
+          '&:hover': {
+            bgcolor: theme.palette.mode === 'light' 
+              ? 'rgba(0, 0, 0, 0.12)' 
+              : 'rgba(255, 255, 255, 0.18)'
+          }
         }}
         onClick={() => setRightDrawerOpen(true)}
       >

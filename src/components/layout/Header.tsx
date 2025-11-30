@@ -58,15 +58,37 @@ export default function Header() {
             />
           </Link>
         </Box>
-        <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+        <Box 
+          sx={{ 
+            display: 'flex', 
+            gap: 0.5, 
+            alignItems: 'center',
+            px: 1,
+            py: 0.5,
+            borderRadius: 1.5,
+            border: `1px solid ${theme.palette.divider}`,
+            bgcolor: theme.palette.mode === 'light'
+              ? 'rgba(0,0,0,0.02)'
+              : 'rgba(255,255,255,0.03)',
+            backdropFilter: 'blur(10px)'
+          }}
+        >
           <Link href="/projects" style={{ textDecoration: 'none' }}>
             <Button
               sx={{
                 color: theme.palette.text.primary,
+                minWidth: 'auto',
+                px: 1,
+                py: 0.5,
+                fontSize: '0.8125rem',
+                fontWeight: 500,
+                bgcolor: theme.palette.mode === 'light'
+                  ? 'rgba(0,0,0,0.03)'
+                  : 'rgba(255,255,255,0.05)',
                 '&:hover': {
                   bgcolor: theme.palette.mode === 'light'
-                    ? 'rgba(0,0,0,0.04)'
-                    : 'rgba(255,255,255,0.08)'
+                    ? 'rgba(0,0,0,0.06)'
+                    : 'rgba(255,255,255,0.1)'
                 }
               }}
             >
@@ -81,14 +103,15 @@ export default function Header() {
                   sx={{
                     color: theme.palette.text.primary,
                     textTransform: 'none',
-                    fontSize: '0.875rem',
+                    fontSize: '0.8125rem',
                     fontWeight: 500,
                     display: 'flex',
                     alignItems: 'center',
                     gap: 0.5,
-                    px: 2,
-                    py: 1,
-                    borderRadius: 2,
+                    px: 1,
+                    py: 0.5,
+                    borderRadius: 1.5,
+                    minWidth: 'auto',
                     '&:hover': {
                       bgcolor: theme.palette.mode === 'light'
                         ? 'rgba(0,0,0,0.04)'
@@ -96,10 +119,10 @@ export default function Header() {
                     }
                   }}
                 >
-                  <Typography variant="body2" sx={{ fontWeight: 500 }}>
+                  <Typography variant="body2" sx={{ fontWeight: 500, fontSize: '0.8125rem' }}>
                     {user.displayName || user.email?.split('@')[0] || 'User'}
                   </Typography>
-                  <ChevronDown size={16} />
+                  <ChevronDown size={14} />
                 </Button>
                 <Menu
                   anchorEl={anchorEl}

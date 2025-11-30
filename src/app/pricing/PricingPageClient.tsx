@@ -1,6 +1,7 @@
 'use client'
 
 import { useMemo, useState, useEffect, useRef } from 'react'
+import { useRouter } from 'next/navigation'
 import {
   Box,
   Button,
@@ -83,6 +84,10 @@ function detectCurrency(): Currency {
 }
 
 function formatPrice(val: number, currency: Currency) {
+  if (currency === 'USD') {
+    // Format USD manually to avoid "US$" prefix
+    return `$${val.toFixed(2)}`
+  }
   const formatter = new Intl.NumberFormat(undefined, {
     style: 'currency',
     currency,
@@ -93,6 +98,7 @@ function formatPrice(val: number, currency: Currency) {
 }
 
 export default function PricingPageClient() {
+  const router = useRouter()
   const [billing, setBilling] = useState<BillingCycle>('monthly')
   const [couponCode, setCouponCode] = useState<string>('')
   const [couponApplied, setCouponApplied] = useState<boolean>(false)
@@ -245,7 +251,7 @@ export default function PricingPageClient() {
                           component="span"
                           variant="subtitle2"
                           color={emphasized ? 'rgba(255,255,255,0.7)' : 'text.secondary'}
-                          sx={{ ml: 1, visibility: plan === 'Free' ? 'hidden' : 'visible' }}
+                          sx={{ ml: 0, visibility: plan === 'Free' ? 'hidden' : 'visible' }}
                         >
                           /mo
                         </Typography>
@@ -280,7 +286,13 @@ export default function PricingPageClient() {
                       })}
                     </List>
                     <Stack sx={{ mt: 2 }}>
-                      <Button variant="contained" size="large" fullWidth sx={{ height: 44, borderRadius: 2, bgcolor: '#000000', color: '#ffffff', '&:hover': { bgcolor: '#333333' } }}>
+                      <Button 
+                        variant="contained" 
+                        size="large" 
+                        fullWidth 
+                        onClick={() => router.push('/projects')}
+                        sx={{ height: 44, borderRadius: 2, bgcolor: '#000000', color: '#ffffff', '&:hover': { bgcolor: '#333333' } }}
+                      >
                         {plan === 'Free' ? 'Get Started' : 'Open Zuve Studio'}
                       </Button>
                     </Stack>
