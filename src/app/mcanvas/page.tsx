@@ -1,11 +1,12 @@
 'use client'
 
-import { useEffect, useState } from 'react'
-import { useRouter } from 'next/navigation'
+import { useEffect, useState, Suspense } from 'react'
+import { useRouter, useSearchParams } from 'next/navigation'
 import MobileCanvas from '@/components/mobile/MobileCanvas'
 
-export default function MobileCanvasPage() {
+function MobileCanvasPageContent() {
   const router = useRouter()
+  const searchParams = useSearchParams()
   const [isMobile, setIsMobile] = useState(false)
 
   useEffect(() => {
@@ -32,7 +33,12 @@ export default function MobileCanvasPage() {
       
       // Redirect desktop users to regular canvas (unless forced)
       if (!mobile && !forceMobile) {
-        router.push('/canvas/1')
+        const projectId = searchParams.get('projectId')
+        if (projectId) {
+          router.push(`/canvas/${projectId}`)
+        } else {
+          router.push('/canvas/1')
+        }
       }
     }
 
@@ -45,7 +51,7 @@ export default function MobileCanvasPage() {
     return () => {
       window.removeEventListener('resize', handleResize)
     }
-  }, [router])
+  }, [router, searchParams])
 
   if (!isMobile) {
     return (
@@ -63,5 +69,23 @@ export default function MobileCanvasPage() {
     )
   }
 
-  return <MobileCanvas />
+  const projectId = searchParams.get('projectId')
+  return <MobileCanvas projectId={projectId || undefined} />
+}
+
+export default function MobileCanvasPage() {
+  return (
+    <Suspense fallback={
+      <div style={{ 
+        display: 'flex', 
+        alignItems: 'center', 
+        justifyContent: 'center', 
+        height: '100vh'
+      }}>
+        <p>Loading...</p>
+      </div>
+    }>
+      <MobileCanvasPageContent />
+    </Suspense>
+  )
 }

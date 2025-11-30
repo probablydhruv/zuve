@@ -20,6 +20,16 @@ import { Edit, Delete } from '@mui/icons-material'
 import { useRouter } from 'next/navigation'
 import { useEffect, useState } from 'react'
 import { useAuth } from '@/components/providers/AuthProvider'
+
+// Helper function to detect if user is on mobile
+const isMobileDevice = (): boolean => {
+  if (typeof window === 'undefined') return false
+  const userAgent = navigator.userAgent
+  const isMobile = /Android|webOS|iPhone|iPod|BlackBerry|IEMobile|Opera Mini/i.test(userAgent)
+  const isTablet = /iPad|Android(?=.*\bMobile\b)/i.test(userAgent)
+  const isMobileViewport = window.innerWidth < 768
+  return (isMobile && !isTablet) || isMobileViewport
+}
 import { 
   getUserProjects, 
   createProject, 
@@ -108,7 +118,12 @@ export default function ProjectsPageClient() {
       
       // Navigate to the new project
       console.log('Navigating to canvas...')
-      router.push(`/canvas/${projectId}`)
+      // Redirect mobile users to mcanvas, desktop users to canvas
+      if (isMobileDevice()) {
+        router.push(`/mcanvas?projectId=${projectId}`)
+      } else {
+        router.push(`/canvas/${projectId}`)
+      }
     } catch (error: unknown) {
       console.error('Error creating project:', error)
       const errMsg = error instanceof Error ? error.message : 'Unknown error'
@@ -352,7 +367,14 @@ export default function ProjectsPageClient() {
                   color: '#ffffff', 
                   '&:hover': { bgcolor: '#333333' } 
                 }} 
-                onClick={() => router.push(`/canvas/${p.id}`)}
+                onClick={() => {
+                  // Redirect mobile users to mcanvas, desktop users to canvas
+                  if (isMobileDevice()) {
+                    router.push(`/mcanvas?projectId=${p.id}`)
+                  } else {
+                    router.push(`/canvas/${p.id}`)
+                  }
+                }}
               >
                 Open
               </Button>

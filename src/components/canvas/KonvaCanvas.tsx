@@ -15,7 +15,7 @@ import UsageBar, { VersionDisplay } from './UsageBar'
 import { UsageData, handleRequest, getCurrentUsageStatus, TierType } from '@/lib/usageTracker'
 import { InteractiveHoverButton } from '@/components/ui/interactive-hover-button'
 import { functions as firebaseFunctions } from '@/lib/firebaseClient'
-import { getCanvasData, saveCanvasData, getUserMotifs, saveUserMotif, deleteUserMotif, Motif } from '@/lib/firestore'
+import { getCanvasData, saveCanvasData, getUserMotifs, saveUserMotif, deleteUserMotif, Motif, uploadCanvasImage, deleteCanvasImage } from '@/lib/firestore'
 
 const STONES = [
   { key: 'none', label: 'None', icon: '⚪' },
@@ -227,6 +227,8 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
     { id: '1', name: 'Layer 1', visible: true, opacity: 1 },
   ])
   const [activeLayerId, setActiveLayerId] = useState('1')
+  const [editingLayerId, setEditingLayerId] = useState<string | null>(null)
+  const [editingLayerName, setEditingLayerName] = useState<string>('')
 
   // Debug active layer changes
   useEffect(() => {
@@ -891,6 +893,42 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
     }
   }, [])
 
+  // Compress image to reduce size for storage
+  const compressImage = useCallback((imageElement: HTMLImageElement, dataUrl: string): Promise<string> => {
+    return new Promise((resolve) => {
+      const maxWidth = 800
+      const quality = 0.6
+      
+      let width = imageElement.width
+      let height = imageElement.height
+      
+      // Only compress if larger than maxWidth
+      if (width > maxWidth) {
+        height = (height * maxWidth) / width
+        width = maxWidth
+      }
+      
+      // Create canvas and draw resized image
+      const canvas = document.createElement('canvas')
+      canvas.width = width
+      canvas.height = height
+      
+      const ctx = canvas.getContext('2d')
+      if (!ctx) {
+        console.warn('Failed to get canvas context, using original image')
+        resolve(dataUrl)
+        return
+      }
+      
+      ctx.drawImage(imageElement, 0, 0, width, height)
+      
+      // Convert to compressed JPEG
+      const compressedDataUrl = canvas.toDataURL('image/jpeg', quality)
+      console.log(`Image compressed: ${(dataUrl.length / 1024).toFixed(1)}KB -> ${(compressedDataUrl.length / 1024).toFixed(1)}KB`)
+      resolve(compressedDataUrl)
+    })
+  }, [])
+
   // Image upload handler
   const handleImageUpload = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
@@ -959,7 +997,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
           return
         }
         
-        const newImage = {
+        const newImage: any = {
           id: imageId,
           x: 100,
           y: 100,
@@ -969,7 +1007,8 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
           scaleX: 1,
           scaleY: 1,
           originalWidth: img.width,
-          originalHeight: img.height
+          originalHeight: img.height,
+          storageUrl: null // Will be set after uploading to Storage
         }
         
         console.log('Image loaded successfully:', {
@@ -983,6 +1022,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
           scale
         })
         
+        // Add image to state immediately for display
         setUploadedImages(prev => [...prev, newImage])
         setImageElements(prev => ({ ...prev, [imageId]: img }))
         setImageLayerMap(prev => {
@@ -994,6 +1034,38 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
         
         // Automatically switch to hand tool after image upload
         setTool('hand')
+        
+        // Compress and store for persistence
+        if (user?.uid && projectId) {
+          // First try Firebase Storage
+          uploadCanvasImage(user.uid, projectId, imageId, imageUrl)
+            .then((storageUrl) => {
+              console.log('Image uploaded to Storage:', storageUrl)
+              // Update the image with the storage URL
+              setUploadedImages(prev => prev.map(imgItem => 
+                imgItem.id === imageId ? { ...imgItem, storageUrl } : imgItem
+              ))
+            })
+            .catch(async (error) => {
+              console.warn('Storage upload failed, falling back to compressed data URL:', error.message)
+              // Fall back to compressed data URL for Firestore storage
+              try {
+                const compressedUrl = await compressImage(img, imageUrl)
+                // Check if compressed image is small enough for Firestore (< 900KB)
+                if (compressedUrl.length < 900000) {
+                  setUploadedImages(prev => prev.map(imgItem => 
+                    imgItem.id === imageId ? { ...imgItem, storageUrl: compressedUrl } : imgItem
+                  ))
+                  console.log('Using compressed data URL for storage')
+                } else {
+                  console.warn('Image too large even after compression, cannot persist')
+                  setSnackbar({ message: 'Image is too large to save. Please use a smaller image.', severity: 'warning' })
+                }
+              } catch (compressError) {
+                console.error('Failed to compress image:', compressError)
+              }
+            })
+        }
       }
       
       img.onerror = (error) => {
@@ -1005,7 +1077,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
     }
     
     reader.readAsDataURL(file)
-  }, [activeLayerId])
+  }, [activeLayerId, user?.uid, projectId, compressImage])
 
   const addGeneratedImageToCanvas = useCallback((url: string) => {
     if (!url || typeof window === 'undefined') return
@@ -1052,6 +1124,9 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
 
   // Remove uploaded image
   const removeImage = useCallback((imageId: string) => {
+    // Find the image to check if it has a storage URL
+    const imageToRemove = uploadedImages.find(img => img.id === imageId)
+    
     setUploadedImages(prev => prev.filter(img => img.id !== imageId))
     setImageElements(prev => {
       const newElements = { ...prev }
@@ -1065,7 +1140,16 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
         transformerRef.current.getLayer().batchDraw()
       }
     }
-  }, [selectedImageId])
+    
+    // Delete from Firebase Storage if it was uploaded there
+    if (imageToRemove?.storageUrl && user?.uid && projectId) {
+      deleteCanvasImage(user.uid, projectId, imageId)
+        .catch((error) => {
+          console.error('Failed to delete image from Storage:', error)
+          // Not critical - image is already removed from canvas
+        })
+    }
+  }, [selectedImageId, uploadedImages, user?.uid, projectId])
 
   // Remove selected image
   const removeSelectedImage = useCallback(() => {
@@ -1557,8 +1641,60 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
             setMotifLayerMap(savedData.motifLayerMap)
             console.log('Restored motif layer map:', Object.keys(savedData.motifLayerMap).length, 'mappings')
           }
-          // Note: images need special handling as they need to be loaded as HTMLImageElements
-          // We'll handle image restoration separately if needed
+          // Restore imageLayerMap
+          if (savedData.imageLayerMap) {
+            setImageLayerMap(savedData.imageLayerMap)
+            console.log('Restored image layer map:', Object.keys(savedData.imageLayerMap).length, 'mappings')
+          }
+          // Restore uploaded images and recreate HTMLImageElements
+          if (savedData.images && savedData.images.length > 0) {
+            console.log('Restoring', savedData.images.length, 'uploaded images')
+            const imagesToRestore: any[] = []
+            const imageElementsToRestore: { [key: string]: HTMLImageElement } = {}
+            
+            // Process each image
+            const imagePromises = savedData.images.map((img: any) => {
+              return new Promise<void>((resolve) => {
+                // Use storageUrl (new format) or dataUrl (legacy format)
+                const imageUrl = img.storageUrl || img.dataUrl
+                const { dataUrl, storageUrl, ...imageData } = img
+                
+                if (!imageUrl) {
+                  console.warn('Image missing URL, skipping:', img.id)
+                  resolve()
+                  return
+                }
+                
+                // Create HTMLImageElement from URL
+                const imgElement = new Image()
+                imgElement.crossOrigin = 'anonymous'
+                
+                imgElement.onload = () => {
+                  // Include storageUrl in the restored image data
+                  imagesToRestore.push({ ...imageData, storageUrl: storageUrl || null })
+                  imageElementsToRestore[imageData.id] = imgElement
+                  console.log('Restored image:', imageData.id, 'from', storageUrl ? 'Storage' : 'dataUrl')
+                  resolve()
+                }
+                
+                imgElement.onerror = (error) => {
+                  console.error('Failed to restore image:', imageData.id, error)
+                  resolve() // Continue with other images even if one fails
+                }
+                
+                imgElement.src = imageUrl
+              })
+            })
+            
+            // Wait for all images to load, then update state
+            Promise.all(imagePromises).then(() => {
+              if (imagesToRestore.length > 0) {
+                setUploadedImages(imagesToRestore)
+                setImageElements(prev => ({ ...prev, ...imageElementsToRestore }))
+                console.log('Successfully restored', imagesToRestore.length, 'images')
+              }
+            })
+          }
         }
       } catch (error) {
         console.error('Error loading canvas data:', error)
@@ -1622,15 +1758,68 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
           canvasSize,
           generatedImagesCount: generatedImages.length
         })
+        // Save images with storage URLs (not base64 data URLs to avoid Firestore size limits)
+        // Only include serializable properties
+        const imagesToSave = uploadedImages
+          .filter(img => img.storageUrl) // Only save images that have been uploaded to Storage
+          .map(img => {
+            // Create a clean object with only serializable properties
+            const cleanImage: any = {
+              id: String(img.id),
+              x: Number(img.x) || 0,
+              y: Number(img.y) || 0,
+              width: Number(img.width) || 0,
+              height: Number(img.height) || 0,
+              rotation: Number(img.rotation) || 0,
+              scaleX: Number(img.scaleX) || 1,
+              scaleY: Number(img.scaleY) || 1,
+              originalWidth: Number(img.originalWidth) || 0,
+              originalHeight: Number(img.originalHeight) || 0,
+              storageUrl: String(img.storageUrl), // Use storage URL instead of base64
+            }
+            
+            // Include optional properties if they exist and are serializable
+            if (img.usePolygonMask === true || img.usePolygonMask === false) {
+              cleanImage.usePolygonMask = Boolean(img.usePolygonMask)
+            }
+            if (img.selectionPolygon && Array.isArray(img.selectionPolygon)) {
+              // Ensure all values in selectionPolygon are numbers
+              cleanImage.selectionPolygon = img.selectionPolygon.map((v: any) => Number(v) || 0)
+            }
+            if (img.originalId && typeof img.originalId === 'string') {
+              cleanImage.originalId = String(img.originalId)
+            }
+            if (typeof img.cropX === 'number') {
+              cleanImage.cropX = Number(img.cropX)
+            }
+            if (typeof img.cropY === 'number') {
+              cleanImage.cropY = Number(img.cropY)
+            }
+            if (img.name && typeof img.name === 'string') {
+              cleanImage.name = String(img.name)
+            }
+            if (img.data && typeof img.data === 'string') {
+              cleanImage.data = String(img.data)
+            }
+            return cleanImage
+          })
+        
+        // Log if some images couldn't be saved yet (still uploading to Storage)
+        const pendingUploads = uploadedImages.filter(img => !img.storageUrl)
+        if (pendingUploads.length > 0) {
+          console.log(`${pendingUploads.length} image(s) still uploading to Storage, will save on next auto-save`)
+        }
+        
         await saveCanvasData(user.uid, projectId, {
           lines,
-          images: uploadedImages,
+          images: imagesToSave,
           layers,
           zoom,
           canvasSize,
           generatedImages,
           insertedMotifs,
           motifLayerMap,
+          imageLayerMap,
         })
         console.log('Canvas auto-saved successfully')
       } catch (error: any) {
@@ -1642,7 +1831,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
         })
       }
     }, 2000)
-  }, [user?.uid, projectId, lines, uploadedImages, layers, zoom, canvasSize, generatedImages, insertedMotifs, motifLayerMap, isLoadingCanvas])
+  }, [user?.uid, projectId, lines, uploadedImages, imageElements, layers, zoom, canvasSize, generatedImages, insertedMotifs, motifLayerMap, imageLayerMap, isLoadingCanvas])
 
   // Auto-save when canvas data changes
   useEffect(() => {
@@ -2295,55 +2484,55 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
     }
   }
 
-  // Wheel event handler for trackpad pinch-to-zoom
+  // Wheel event handler for mouse wheel zoom and trackpad pinch-to-zoom
   const handleWheel = (e: any) => {
     // Check if this is a pinch gesture (ctrlKey on Windows/Linux, metaKey or ctrlKey on macOS)
     const isPinchGesture = e.evt.ctrlKey || e.evt.metaKey
     
-    if (isPinchGesture) {
-      e.evt.preventDefault()
-      
-      const stage = e.target.getStage()
-      if (!stage) return
-      
-      // Get pointer position in container coordinates (unscaled)
-      const pointerPos = stage.getPointerPosition()
-      if (!pointerPos) return
-      
-      // Get current stage position and zoom
-      const oldZoom = zoom
-      const oldStageX = stage.x()
-      const oldStageY = stage.y()
-      
-      // Calculate zoom delta
-      // Negative deltaY = zoom in, positive deltaY = zoom out
-      const zoomSpeed = 0.01 // Adjust this to control zoom sensitivity
-      const zoomDelta = -e.evt.deltaY * zoomSpeed
-      
-      // Calculate new zoom with constraints
-      const newZoom = Math.max(minZoom, Math.min(maxZoom, oldZoom + zoomDelta))
-      
-      // If zoom didn't change, don't update
-      if (newZoom === oldZoom) return
-      
-      // If zooming out to 100% (minZoom), reset to centered position
-      if (newZoom === minZoom) {
-        setZoom(newZoom)
-        stage.x(0)
-        stage.y(0)
-        return
-      }
-      
-      // For zooming in, keep the point under cursor fixed
-      // Formula: newPos = oldPos - (pointerPos - oldPos) * (newZoom - oldZoom) / oldZoom
-      const newStageX = oldStageX - (pointerPos.x - oldStageX) * (newZoom - oldZoom) / oldZoom
-      const newStageY = oldStageY - (pointerPos.y - oldStageY) * (newZoom - oldZoom) / oldZoom
-      
-      // Update zoom and stage position
+    // Allow zoom with regular mouse wheel OR pinch gesture
+    e.evt.preventDefault()
+    
+    const stage = e.target.getStage()
+    if (!stage) return
+    
+    // Get pointer position in container coordinates (unscaled)
+    const pointerPos = stage.getPointerPosition()
+    if (!pointerPos) return
+    
+    // Get current stage position and zoom
+    const oldZoom = zoom
+    const oldStageX = stage.x()
+    const oldStageY = stage.y()
+    
+    // Calculate zoom delta
+    // Negative deltaY = zoom in, positive deltaY = zoom out
+    // Use different sensitivity for regular wheel vs pinch
+    const zoomSpeed = isPinchGesture ? 0.01 : 0.05 // More sensitive for regular mouse wheel
+    const zoomDelta = -e.evt.deltaY * zoomSpeed
+    
+    // Calculate new zoom with constraints
+    const newZoom = Math.max(minZoom, Math.min(maxZoom, oldZoom + zoomDelta))
+    
+    // If zoom didn't change, don't update
+    if (newZoom === oldZoom) return
+    
+    // If zooming out to 100% (minZoom), reset to centered position
+    if (newZoom === minZoom) {
       setZoom(newZoom)
-      stage.x(newStageX)
-      stage.y(newStageY)
+      stage.x(0)
+      stage.y(0)
+      return
     }
+    
+    // For zooming in, keep the point under cursor fixed
+    // Formula: newPos = oldPos - (pointerPos - oldPos) * (newZoom - oldZoom) / oldZoom
+    const newStageX = oldStageX - (pointerPos.x - oldStageX) * (newZoom - oldZoom) / oldZoom
+    const newStageY = oldStageY - (pointerPos.y - oldStageY) * (newZoom - oldZoom) / oldZoom
+    
+    // Update zoom and stage position
+    setZoom(newZoom)
+    stage.x(newStageX)
+    stage.y(newStageY)
   }
 
   // Floating toolbar drag handlers
@@ -2541,56 +2730,159 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
         </Box>
         <List dense sx={{ flex: 1, overflowY: 'auto', px: 1 }}>
           {layers.map(l => (
-                    <ListItem key={l.id} onClick={() => {
-                      console.log('Switching to layer:', l.id)
-                      setActiveLayerId(l.id)
-                    }} sx={{ cursor: 'pointer', border: '1px solid rgba(0,0,0,0.08)', borderRadius: 1, mb: 0.5, backgroundColor: l.id === activeLayerId ? 'action.selected' : 'transparent' }}>
-              <ListItemText primary={l.name} />
+                    <ListItem 
+                      key={l.id} 
+                      onClick={(e) => {
+                        // Don't switch layer if clicking on buttons or text field
+                        if ((e.target as HTMLElement).closest('button') || (e.target as HTMLElement).closest('input')) {
+                          return
+                        }
+                        console.log('Switching to layer:', l.id)
+                        setActiveLayerId(l.id)
+                      }}
+                      onDoubleClick={(e) => {
+                        // Don't start editing if clicking on buttons
+                        if ((e.target as HTMLElement).closest('button')) {
+                          return
+                        }
+                        e.stopPropagation()
+                        setEditingLayerId(l.id)
+                        setEditingLayerName(l.name)
+                      }}
+                      sx={{ cursor: 'pointer', border: '1px solid rgba(0,0,0,0.08)', borderRadius: 1, mb: 0.5, backgroundColor: l.id === activeLayerId ? 'action.selected' : 'transparent' }}
+                    >
+              {editingLayerId === l.id ? (
+                <TextField
+                  value={editingLayerName}
+                  onChange={(e) => setEditingLayerName(e.target.value)}
+                  onBlur={() => {
+                    if (editingLayerName.trim()) {
+                      setLayers(prev => prev.map(x => x.id === l.id ? { ...x, name: editingLayerName.trim() } : x))
+                    }
+                    setEditingLayerId(null)
+                    setEditingLayerName('')
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault()
+                      if (editingLayerName.trim()) {
+                        setLayers(prev => prev.map(x => x.id === l.id ? { ...x, name: editingLayerName.trim() } : x))
+                      }
+                      setEditingLayerId(null)
+                      setEditingLayerName('')
+                    } else if (e.key === 'Escape') {
+                      setEditingLayerId(null)
+                      setEditingLayerName('')
+                    }
+                  }}
+                  onClick={(e) => e.stopPropagation()}
+                  autoFocus
+                  size="small"
+                  variant="standard"
+                  sx={{ 
+                    flex: 1,
+                    '& .MuiInputBase-input': {
+                      fontSize: '0.875rem',
+                      py: 0.5,
+                    }
+                  }}
+                />
+              ) : (
+                <ListItemText primary={l.name} />
+              )}
               <ListItemSecondaryAction>
-                <IconButton edge="end" size="small" onClick={() => {
+                <IconButton edge="end" size="small" onClick={(e) => {
+                  e.stopPropagation()
                   console.log('Toggling visibility for layer:', l.id, 'Current visible:', l.visible)
                   setLayers(prev => prev.map(x => x.id === l.id ? { ...x, visible: !x.visible } : x))
                 }}>
                   {l.visible ? <Visibility fontSize="small" /> : <VisibilityOff fontSize="small" />}
                 </IconButton>
                 {layers.length > 1 && (
-                  <IconButton edge="end" size="small" onClick={() => {
-                    // Delete layer and clean up mappings
+                  <IconButton edge="end" size="small" onClick={(e) => {
+                    e.stopPropagation()
+                    // Delete layer and remove all content from that layer
                     setLayers(prev => prev.filter(x => x.id !== l.id))
-                    // Move content from deleted layer to the first remaining layer
+                    
+                    // Delete all lines from this layer
+                    setLineLayerMap(currentLineLayerMap => {
+                      setLines(prev => {
+                        const newLines: any[] = []
+                        const newLineLayerMap: { [key: number]: string } = {}
+                        let newIndex = 0
+                        
+                        prev.forEach((line, oldIndex) => {
+                          const lineLayerId = currentLineLayerMap[oldIndex]
+                          // Only keep lines that are NOT on the deleted layer
+                          if (lineLayerId !== l.id) {
+                            newLines.push(line)
+                            // Update the lineLayerMap with new indices
+                            newLineLayerMap[newIndex] = lineLayerId
+                            newIndex++
+                          }
+                        })
+                        
+                        return newLines
+                      })
+                      // Return the new lineLayerMap
+                      const newLineLayerMap: { [key: number]: string } = {}
+                      let newIndex = 0
+                      Object.keys(currentLineLayerMap).forEach(key => {
+                        const numKey = parseInt(key)
+                        if (currentLineLayerMap[numKey] !== l.id) {
+                          newLineLayerMap[newIndex] = currentLineLayerMap[numKey]
+                          newIndex++
+                        }
+                      })
+                      return newLineLayerMap
+                    })
+                    
+                    // Delete all images from this layer
+                    setImageLayerMap(currentImageLayerMap => {
+                      setUploadedImages(prev => {
+                        const imagesToDelete = prev.filter(img => currentImageLayerMap[img.id] === l.id)
+                        // Delete images from Storage if they were uploaded
+                        imagesToDelete.forEach(img => {
+                          if (img.storageUrl && user?.uid && projectId) {
+                            deleteCanvasImage(user.uid, projectId, img.id).catch(err => 
+                              console.error('Failed to delete image from Storage:', err)
+                            )
+                          }
+                        })
+                        return prev.filter(img => currentImageLayerMap[img.id] !== l.id)
+                      })
+                      
+                      // Clean up imageLayerMap
+                      const newMap = { ...currentImageLayerMap }
+                      Object.keys(newMap).forEach(key => {
+                        if (newMap[key] === l.id) {
+                          delete newMap[key]
+                        }
+                      })
+                      return newMap
+                    })
+                    
+                    // Delete all motifs from this layer
+                    setMotifLayerMap(currentMotifLayerMap => {
+                      setInsertedMotifs(prev => prev.filter(motif => {
+                        const motifLayerId = currentMotifLayerMap[motif.id]
+                        return motifLayerId !== l.id
+                      }))
+                      
+                      // Clean up motifLayerMap
+                      const newMap = { ...currentMotifLayerMap }
+                      Object.keys(newMap).forEach(key => {
+                        if (newMap[key] === l.id) {
+                          delete newMap[key]
+                        }
+                      })
+                      return newMap
+                    })
+                    
+                    // Set active layer to the first remaining layer
                     const remainingLayers = layers.filter(x => x.id !== l.id)
                     if (remainingLayers.length > 0) {
-                      const targetLayerId = remainingLayers[0].id
-                      setLineLayerMap(prev => {
-                        const newMap = { ...prev }
-                        Object.keys(newMap).forEach(key => {
-                          const numKey = parseInt(key)
-                          if (newMap[numKey] === l.id) {
-                            newMap[numKey] = targetLayerId
-                          }
-                        })
-                        return newMap
-                      })
-                      setImageLayerMap(prev => {
-                        const newMap = { ...prev }
-                        Object.keys(newMap).forEach(key => {
-                          if (newMap[key] === l.id) {
-                            newMap[key] = targetLayerId
-                          }
-                        })
-                        return newMap
-                      })
-                      setMotifLayerMap(prev => {
-                        const newMap = { ...prev }
-                        Object.keys(newMap).forEach(key => {
-                          if (newMap[key] === l.id) {
-                            newMap[key] = targetLayerId
-                          }
-                        })
-                        return newMap
-                      })
-                      // Set active layer to the target layer
-                      setActiveLayerId(targetLayerId)
+                      setActiveLayerId(remainingLayers[0].id)
                     }
                   }}>
                     <Delete fontSize="small" />
@@ -3516,6 +3808,8 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
               top: 80,
               right: 20,
               zIndex: 1000,
+              display: 'flex',
+              gap: 1,
             }}
           >
             <Tooltip title={currentViewImageUrl === harmonizedImageUrl ? 'Switch to Rendered' : 'Switch to Harmonized'}>
@@ -3541,6 +3835,45 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                 }}
               >
                 <SwapHoriz fontSize="small" />
+              </IconButton>
+            </Tooltip>
+          </Box>
+        )}
+
+        {/* Remove image button - appears when any image is displayed */}
+        {currentViewImageUrl && (
+          <Box
+            sx={{
+              position: 'absolute',
+              top: 20,
+              left: 20,
+              zIndex: 1000,
+            }}
+          >
+            <Tooltip title="Remove image from canvas">
+              <IconButton
+                onClick={(e) => {
+                  e.stopPropagation()
+                  e.preventDefault()
+                  setCurrentViewImageUrl(null)
+                  setShowCanvasCompare(false)
+                  setGeneratedImageElement(null)
+                }}
+                sx={{
+                  bgcolor: 'background.paper',
+                  border: '1px solid',
+                  borderColor: 'divider',
+                  boxShadow: '0 2px 8px rgba(0,0,0,0.15)',
+                  '&:hover': {
+                    bgcolor: 'error.main',
+                    color: 'error.contrastText',
+                    boxShadow: '0 4px 12px rgba(0,0,0,0.2)',
+                  },
+                  width: 36,
+                  height: 36,
+                }}
+              >
+                <Close fontSize="small" />
               </IconButton>
             </Tooltip>
           </Box>
@@ -5277,47 +5610,156 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
           </Box>
           <List dense sx={{ flex: 1, overflowY: 'auto', px: 1 }}>
             {layers.map(l => (
-                    <ListItem key={l.id} onClick={() => {
-                      console.log('Mobile: Switching to layer:', l.id)
-                      setActiveLayerId(l.id)
-                    }} sx={{ cursor: 'pointer', border: '1px solid rgba(0,0,0,0.08)', borderRadius: 1, mb: 0.5, backgroundColor: l.id === activeLayerId ? 'action.selected' : 'transparent' }}>
-                <ListItemText primary={l.name} />
+                    <ListItem 
+                      key={l.id} 
+                      onClick={(e) => {
+                        // Don't switch layer if clicking on buttons or text field
+                        if ((e.target as HTMLElement).closest('button') || (e.target as HTMLElement).closest('input')) {
+                          return
+                        }
+                        console.log('Mobile: Switching to layer:', l.id)
+                        setActiveLayerId(l.id)
+                      }}
+                      onDoubleClick={(e) => {
+                        // Don't start editing if clicking on buttons
+                        if ((e.target as HTMLElement).closest('button')) {
+                          return
+                        }
+                        e.stopPropagation()
+                        setEditingLayerId(l.id)
+                        setEditingLayerName(l.name)
+                      }}
+                      sx={{ cursor: 'pointer', border: '1px solid rgba(0,0,0,0.08)', borderRadius: 1, mb: 0.5, backgroundColor: l.id === activeLayerId ? 'action.selected' : 'transparent' }}
+                    >
+                {editingLayerId === l.id ? (
+                  <TextField
+                    value={editingLayerName}
+                    onChange={(e) => setEditingLayerName(e.target.value)}
+                    onBlur={() => {
+                      if (editingLayerName.trim()) {
+                        setLayers(prev => prev.map(x => x.id === l.id ? { ...x, name: editingLayerName.trim() } : x))
+                      }
+                      setEditingLayerId(null)
+                      setEditingLayerName('')
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault()
+                        if (editingLayerName.trim()) {
+                          setLayers(prev => prev.map(x => x.id === l.id ? { ...x, name: editingLayerName.trim() } : x))
+                        }
+                        setEditingLayerId(null)
+                        setEditingLayerName('')
+                      } else if (e.key === 'Escape') {
+                        setEditingLayerId(null)
+                        setEditingLayerName('')
+                      }
+                    }}
+                    onClick={(e) => e.stopPropagation()}
+                    autoFocus
+                    size="small"
+                    variant="standard"
+                    sx={{ 
+                      flex: 1,
+                      '& .MuiInputBase-input': {
+                        fontSize: '0.875rem',
+                        py: 0.5,
+                      }
+                    }}
+                  />
+                ) : (
+                  <ListItemText primary={l.name} />
+                )}
                 <ListItemSecondaryAction>
-                  <IconButton edge="end" size="small" onClick={() => {
+                  <IconButton edge="end" size="small" onClick={(e) => {
+                    e.stopPropagation()
                     console.log('Mobile: Toggling visibility for layer:', l.id, 'Current visible:', l.visible)
                     setLayers(prev => prev.map(x => x.id === l.id ? { ...x, visible: !x.visible } : x))
                   }}>
                     {l.visible ? <Visibility fontSize="small" /> : <VisibilityOff fontSize="small" />}
                   </IconButton>
                   {layers.length > 1 && (
-                    <IconButton edge="end" size="small" onClick={() => {
-                      // Delete layer and clean up mappings
+                    <IconButton edge="end" size="small" onClick={(e) => {
+                      e.stopPropagation()
+                      // Delete layer and remove all content from that layer
                       setLayers(prev => prev.filter(x => x.id !== l.id))
-                      // Move content from deleted layer to the first remaining layer
+                      
+                      // Delete all lines from this layer
+                      setLineLayerMap(currentLineLayerMap => {
+                        setLines(prev => {
+                          const newLines: any[] = []
+                          let newIndex = 0
+                          
+                          prev.forEach((line, oldIndex) => {
+                            const lineLayerId = currentLineLayerMap[oldIndex]
+                            // Only keep lines that are NOT on the deleted layer
+                            if (lineLayerId !== l.id) {
+                              newLines.push(line)
+                              newIndex++
+                            }
+                          })
+                          
+                          return newLines
+                        })
+                        // Return the new lineLayerMap
+                        const newLineLayerMap: { [key: number]: string } = {}
+                        let newIndex = 0
+                        Object.keys(currentLineLayerMap).forEach(key => {
+                          const numKey = parseInt(key)
+                          if (currentLineLayerMap[numKey] !== l.id) {
+                            newLineLayerMap[newIndex] = currentLineLayerMap[numKey]
+                            newIndex++
+                          }
+                        })
+                        return newLineLayerMap
+                      })
+                      
+                      // Delete all images from this layer
+                      setImageLayerMap(currentImageLayerMap => {
+                        setUploadedImages(prev => {
+                          const imagesToDelete = prev.filter(img => currentImageLayerMap[img.id] === l.id)
+                          // Delete images from Storage if they were uploaded
+                          imagesToDelete.forEach(img => {
+                            if (img.storageUrl && user?.uid && projectId) {
+                              deleteCanvasImage(user.uid, projectId, img.id).catch(err => 
+                                console.error('Failed to delete image from Storage:', err)
+                              )
+                            }
+                          })
+                          return prev.filter(img => currentImageLayerMap[img.id] !== l.id)
+                        })
+                        
+                        // Clean up imageLayerMap
+                        const newMap = { ...currentImageLayerMap }
+                        Object.keys(newMap).forEach(key => {
+                          if (newMap[key] === l.id) {
+                            delete newMap[key]
+                          }
+                        })
+                        return newMap
+                      })
+                      
+                      // Delete all motifs from this layer
+                      setMotifLayerMap(currentMotifLayerMap => {
+                        setInsertedMotifs(prev => prev.filter(motif => {
+                          const motifLayerId = currentMotifLayerMap[motif.id]
+                          return motifLayerId !== l.id
+                        }))
+                        
+                        // Clean up motifLayerMap
+                        const newMap = { ...currentMotifLayerMap }
+                        Object.keys(newMap).forEach(key => {
+                          if (newMap[key] === l.id) {
+                            delete newMap[key]
+                          }
+                        })
+                        return newMap
+                      })
+                      
+                      // Set active layer to the first remaining layer
                       const remainingLayers = layers.filter(x => x.id !== l.id)
                       if (remainingLayers.length > 0) {
-                        const targetLayerId = remainingLayers[0].id
-                        setLineLayerMap(prev => {
-                          const newMap = { ...prev }
-                          Object.keys(newMap).forEach(key => {
-                            const numKey = parseInt(key)
-                            if (newMap[numKey] === l.id) {
-                              newMap[numKey] = targetLayerId
-                            }
-                          })
-                          return newMap
-                        })
-                        setImageLayerMap(prev => {
-                          const newMap = { ...prev }
-                          Object.keys(newMap).forEach(key => {
-                            if (newMap[key] === l.id) {
-                              newMap[key] = targetLayerId
-                            }
-                          })
-                          return newMap
-                        })
-                        // Set active layer to the target layer
-                        setActiveLayerId(targetLayerId)
+                        setActiveLayerId(remainingLayers[0].id)
                       }
                     }}>
                       <Delete fontSize="small" />
@@ -6809,7 +7251,11 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                       },
                     },
                   }}
-                  onClick={() => setCurrentViewImageUrl(imageUrl)}
+                  onClick={() => {
+                    setCurrentViewImageUrl(imageUrl)
+                    // Show comparison bar when image is selected from library
+                    // The useEffect will handle loading the image and showing the comparison
+                  }}
                 >
                   <Box
                     component="img"

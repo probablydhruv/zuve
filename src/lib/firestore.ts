@@ -13,7 +13,8 @@ import {
   Timestamp,
   writeBatch
 } from 'firebase/firestore'
-import { db } from './firebaseClient'
+import { ref, uploadString, getDownloadURL, deleteObject, listAll } from 'firebase/storage'
+import { db, storage } from './firebaseClient'
 import { TierType } from './usageTracker'
 
 // User profile type
@@ -47,6 +48,7 @@ export type CanvasData = {
   generatedImages?: string[] // Array of generated/harmonized image URLs
   insertedMotifs?: any[] // Array of motifs inserted on the canvas
   motifLayerMap?: { [motifId: string]: string } // Mapping of motif IDs to layer IDs
+  imageLayerMap?: { [imageId: string]: string } // Mapping of image IDs to layer IDs
   updatedAt: Timestamp | Date
 }
 
@@ -600,6 +602,110 @@ export async function updateUserMotif(
       throw new Error('Permission denied: Check Firestore Security Rules')
     }
     throw error
+  }
+}
+
+// ==================== Storage Functions for Canvas Images ====================
+
+/**
+ * Upload a canvas image to Firebase Storage
+ * @param userId - User ID
+ * @param projectId - Project ID
+ * @param imageId - Unique image ID
+ * @param dataUrl - Base64 data URL of the image
+ * @returns Download URL of the uploaded image
+ */
+export async function uploadCanvasImage(
+  userId: string,
+  projectId: string,
+  imageId: string,
+  dataUrl: string
+): Promise<string> {
+  if (!userId || !projectId || !imageId || !dataUrl) {
+    throw new Error('All parameters are required for image upload')
+  }
+  
+  try {
+    // Create a reference to the image location in Storage
+    const imagePath = `users/${userId}/projects/${projectId}/images/${imageId}`
+    const imageRef = ref(storage, imagePath)
+    
+    // Upload the base64 data URL
+    const snapshot = await uploadString(imageRef, dataUrl, 'data_url')
+    console.log('Image uploaded to Storage:', imagePath)
+    
+    // Get the download URL
+    const downloadURL = await getDownloadURL(snapshot.ref)
+    return downloadURL
+  } catch (error: any) {
+    console.error('Error uploading canvas image:', error)
+    throw error
+  }
+}
+
+/**
+ * Delete a canvas image from Firebase Storage
+ * @param userId - User ID
+ * @param projectId - Project ID
+ * @param imageId - Unique image ID
+ */
+export async function deleteCanvasImage(
+  userId: string,
+  projectId: string,
+  imageId: string
+): Promise<void> {
+  if (!userId || !projectId || !imageId) {
+    throw new Error('All parameters are required for image deletion')
+  }
+  
+  try {
+    const imagePath = `users/${userId}/projects/${projectId}/images/${imageId}`
+    const imageRef = ref(storage, imagePath)
+    await deleteObject(imageRef)
+    console.log('Image deleted from Storage:', imagePath)
+  } catch (error: any) {
+    // Ignore if file doesn't exist
+    if (error?.code === 'storage/object-not-found') {
+      console.log('Image already deleted or not found:', imageId)
+      return
+    }
+    console.error('Error deleting canvas image:', error)
+    throw error
+  }
+}
+
+/**
+ * Test if Firebase Storage is enabled and accessible
+ * @returns Promise<{ enabled: boolean; error?: string }>
+ */
+export async function testStorageAvailability(): Promise<{ enabled: boolean; error?: string }> {
+  try {
+    // Try to create a reference to a test path
+    const testRef = ref(storage, 'test/availability-check')
+    
+    // Try to list files in the root (this will fail if Storage is not enabled)
+    // We use a try-catch around listAll since it might fail
+    try {
+      await listAll(ref(storage, ''))
+      return { enabled: true }
+    } catch (listError: any) {
+      // If we get a permission error, Storage might be enabled but we don't have access
+      // If we get a "not set up" error, Storage is not enabled
+      if (listError?.code === 'storage/unauthorized' || listError?.code === 'permission-denied') {
+        // Storage exists but we might not have permission - this means it's enabled
+        return { enabled: true, error: 'Storage enabled but may have permission issues' }
+      }
+      if (listError?.message?.includes('not set up') || listError?.message?.includes('not found')) {
+        return { enabled: false, error: 'Firebase Storage is not enabled for this project' }
+      }
+      // Other errors might indicate Storage is enabled but has issues
+      return { enabled: true, error: listError?.message || 'Unknown error' }
+    }
+  } catch (error: any) {
+    return { 
+      enabled: false, 
+      error: error?.message || 'Failed to check Storage availability' 
+    }
   }
 }
 

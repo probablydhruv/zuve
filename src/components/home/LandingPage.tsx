@@ -127,31 +127,57 @@ export default function LandingPage() {
         <Container maxWidth="xl">
           <Stack direction={{ xs: 'column', sm: 'column', md: 'row' }} spacing={{ xs: 4, sm: 5, md: 6 }} alignItems="center">
             <Box sx={{ flex: 1, textAlign: { xs: 'center', md: 'left' } }}>
-              <Typography variant="h2" component="h1" gutterBottom sx={{ mb: 3 }}>
+              <Typography 
+                variant="h2" 
+                component="h1" 
+                gutterBottom 
+                sx={{ 
+                  mb: 3,
+                  fontSize: { xs: '2rem', sm: '2.5rem', md: '3rem', lg: '3.75rem' },
+                  lineHeight: { xs: 1.2, md: 1.3 }
+                }}
+              >
                 Design Jewellery
                 <br />
                 <Box component="span" sx={{ color: theme.palette.text.primary, fontWeight: 500 }}>10x Faster</Box>
               </Typography>
-              <Typography variant="h6" color="text.secondary" sx={{ mb: 4, maxWidth: '500px', mx: { xs: 'auto', md: 0 } }}>
+              <Typography 
+                variant="h6" 
+                color="text.secondary" 
+                sx={{ 
+                  mb: 4, 
+                  maxWidth: '500px', 
+                  mx: { xs: 'auto', md: 0 },
+                  fontSize: { xs: '0.875rem', sm: '1rem', md: '1.25rem' }
+                }}
+              >
                 The creative studio for jewellery designers.
               </Typography>
-              <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} justifyContent={{ xs: 'center', md: 'flex-start' }} sx={{ flexWrap: 'nowrap' }}>
-                        <Button
-                          variant="contained"
-                          size="large"
-                          onClick={handleGetStarted}
-                          disabled={loading}
-                          endIcon={<ArrowForward />}
-                          sx={{
-                            bgcolor: '#000000',
-                            color: '#ffffff',
-                            '&:hover': { bgcolor: '#333333' },
-                            '&:disabled': { bgcolor: '#cccccc', color: '#666666' },
-                            whiteSpace: 'nowrap',
-                            minWidth: 'fit-content',
-                            px: 3
-                          }}
-                        >
+              <Stack 
+                direction={{ xs: 'column', sm: 'row' }} 
+                spacing={2} 
+                justifyContent={{ xs: 'center', md: 'flex-start' }} 
+                sx={{ flexWrap: 'nowrap', width: { xs: '100%', sm: 'auto' } }}
+              >
+                <Button
+                  variant="contained"
+                  size="large"
+                  onClick={handleGetStarted}
+                  disabled={loading}
+                  endIcon={<ArrowForward />}
+                  sx={{
+                    bgcolor: '#000000',
+                    color: '#ffffff',
+                    '&:hover': { bgcolor: '#333333' },
+                    '&:disabled': { bgcolor: '#cccccc', color: '#666666' },
+                    whiteSpace: 'nowrap',
+                    minWidth: 'fit-content',
+                    px: { xs: 2, sm: 3 },
+                    py: { xs: 1.25, sm: 1.5 },
+                    fontSize: { xs: '0.875rem', sm: '1rem' },
+                    width: { xs: '100%', sm: 'auto' }
+                  }}
+                >
                   {user ? 'Go to Projects' : 'Get Started'}
                 </Button>
                 <Button
@@ -172,7 +198,10 @@ export default function LandingPage() {
                     },
                     whiteSpace: 'nowrap',
                     minWidth: 'fit-content',
-                    px: 3
+                    px: { xs: 2, sm: 3 },
+                    py: { xs: 1.25, sm: 1.5 },
+                    fontSize: { xs: '0.875rem', sm: '1rem' },
+                    width: { xs: '100%', sm: 'auto' }
                   }}
                 >
                   Schedule a Demo
@@ -182,9 +211,9 @@ export default function LandingPage() {
             <Box sx={{ flex: 1, position: 'relative' }}>
               <Box sx={{ 
                 width: '100%', 
-                aspectRatio: '16/9', 
-                maxHeight: '600px',
-                minHeight: '400px',
+                aspectRatio: { xs: '4/3', sm: '16/9' }, 
+                maxHeight: { xs: '400px', sm: '500px', md: '600px' },
+                minHeight: { xs: '250px', sm: '300px', md: '400px' },
                 borderRadius: 3, 
                 overflow: 'hidden', 
                 position: 'relative' 
@@ -230,10 +259,26 @@ export default function LandingPage() {
       <Box sx={{ py: { xs: 6, md: 8 }, bgcolor: 'background.paper' }}>
         <Container maxWidth="lg">
           <Box sx={{ textAlign: 'center', mb: 6 }}>
-            <Typography variant="h3" component="h2" gutterBottom>
+            <Typography 
+              variant="h3" 
+              component="h2" 
+              gutterBottom
+              sx={{
+                fontSize: { xs: '1.75rem', sm: '2rem', md: '2.5rem', lg: '3rem' },
+                lineHeight: { xs: 1.3, md: 1.4 },
+                px: { xs: 2, md: 0 }
+              }}
+            >
               Zuve handles every creative step on one platform.
             </Typography>
-            <Typography variant="h6" color="text.secondary">
+            <Typography 
+              variant="h6" 
+              color="text.secondary"
+              sx={{
+                fontSize: { xs: '0.875rem', sm: '1rem', md: '1.25rem' },
+                px: { xs: 2, md: 0 }
+              }}
+            >
               No switching tools, no wasted hours, complete design workflow at lightning speed.
             </Typography>
           </Box>
@@ -714,10 +759,29 @@ export default function LandingPage() {
       <Box sx={{ py: { xs: 6, md: 8 }, bgcolor: 'background.default' }}>
         <Container maxWidth="xl">
           <Box sx={{ textAlign: 'center', mb: 6 }}>
-            <Typography variant="h3" component="h2" gutterBottom sx={{ fontWeight: 600 }}>
+            <Typography 
+              variant="h3" 
+              component="h2" 
+              gutterBottom 
+              sx={{ 
+                fontWeight: 600,
+                fontSize: { xs: '1.75rem', sm: '2rem', md: '2.5rem', lg: '3rem' },
+                lineHeight: { xs: 1.3, md: 1.4 },
+                px: { xs: 2, md: 0 }
+              }}
+            >
               From the Studio
             </Typography>
-            <Typography variant="h6" color="text.secondary" sx={{ whiteSpace: 'nowrap', mx: 'auto' }}>
+            <Typography 
+              variant="h6" 
+              color="text.secondary" 
+              sx={{ 
+                whiteSpace: { xs: 'normal', sm: 'nowrap' },
+                mx: 'auto',
+                fontSize: { xs: '0.875rem', sm: '1rem', md: '1.25rem' },
+                px: { xs: 2, md: 0 }
+              }}
+            >
               See how Zuve Studio transforms simple sketches into stunning jewellery pieces
             </Typography>
           </Box>
@@ -812,10 +876,29 @@ export default function LandingPage() {
       <Box sx={{ py: { xs: 8, md: 12 }, bgcolor: 'background.paper' }}>
         <Container maxWidth="lg">
           <Box sx={{ textAlign: 'center', mb: 8 }}>
-            <Typography variant="h3" component="h2" gutterBottom sx={{ fontWeight: 600 }}>
+            <Typography 
+              variant="h3" 
+              component="h2" 
+              gutterBottom 
+              sx={{ 
+                fontWeight: 600,
+                fontSize: { xs: '1.75rem', sm: '2rem', md: '2.5rem', lg: '3rem' },
+                lineHeight: { xs: 1.3, md: 1.4 },
+                px: { xs: 2, md: 0 }
+              }}
+            >
               Complete Features
             </Typography>
-            <Typography variant="h6" color="text.secondary" sx={{ maxWidth: '600px', mx: 'auto' }}>
+            <Typography 
+              variant="h6" 
+              color="text.secondary" 
+              sx={{ 
+                maxWidth: '600px', 
+                mx: 'auto',
+                fontSize: { xs: '0.875rem', sm: '1rem', md: '1.25rem' },
+                px: { xs: 2, md: 0 }
+              }}
+            >
               Everything you need in one platform
             </Typography>
           </Box>
@@ -833,30 +916,53 @@ export default function LandingPage() {
             p: { xs: 4, md: 6 },
             borderRadius: 2
           }}>
-            <Typography variant="h5" component="h3" gutterBottom sx={{ fontWeight: 600, mb: 2, color: '#ffffff' }}>
+            <Typography 
+              variant="h5" 
+              component="h3" 
+              gutterBottom 
+              sx={{ 
+                fontWeight: 600, 
+                mb: 2, 
+                color: '#ffffff',
+                fontSize: { xs: '1.25rem', sm: '1.5rem', md: '1.75rem' },
+                lineHeight: { xs: 1.3, md: 1.4 },
+                px: { xs: 2, md: 0 }
+              }}
+            >
               Design 10x Faster.
             </Typography>
-            <Typography variant="body1" sx={{ mb: 4, maxWidth: '500px', mx: 'auto', color: '#ffffff' }}>
+            <Typography 
+              variant="body1" 
+              sx={{ 
+                mb: 4, 
+                maxWidth: '500px', 
+                mx: 'auto', 
+                color: '#ffffff',
+                fontSize: { xs: '0.875rem', sm: '1rem' },
+                px: { xs: 2, md: 0 }
+              }}
+            >
               Join hundereds of designers who are already creating faster
               <br />
               and efficiently with Zuve Studio.
             </Typography>
-                    <Button
-                      variant="contained"
-                      size="medium"
-                      onClick={handleGetStarted}
-                      disabled={loading}
-                      sx={{
-                        bgcolor: '#ffffff',
-                        color: '#000000',
-                        px: 3,
-                        py: 1,
-                        fontSize: '0.875rem',
-                        '&:hover': { bgcolor: '#f0f0f0' },
-                        '&:disabled': { bgcolor: '#cccccc', color: '#666666' }
-                      }}
-                      endIcon={<ArrowForward />}
-                    >
+            <Button
+              variant="contained"
+              size="medium"
+              onClick={handleGetStarted}
+              disabled={loading}
+              sx={{
+                bgcolor: '#ffffff',
+                color: '#000000',
+                px: { xs: 2, sm: 3 },
+                py: { xs: 1.25, sm: 1.5 },
+                fontSize: { xs: '0.875rem', sm: '0.875rem', md: '1rem' },
+                '&:hover': { bgcolor: '#f0f0f0' },
+                '&:disabled': { bgcolor: '#cccccc', color: '#666666' },
+                width: { xs: '100%', sm: 'auto' }
+              }}
+              endIcon={<ArrowForward />}
+            >
               Open Zuve Studio
             </Button>
           </Box>

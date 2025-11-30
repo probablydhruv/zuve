@@ -21,7 +21,11 @@ interface MobileCanvasState {
   isSwipePanelOpen: boolean
 }
 
-export default function MobileCanvas() {
+interface MobileCanvasProps {
+  projectId?: string
+}
+
+export default function MobileCanvas({ projectId }: MobileCanvasProps) {
   const theme = useTheme()
   
   // Mobile canvas state

@@ -12,18 +12,17 @@ export function middleware(request: NextRequest) {
   // For testing: Allow manual access to mcanvas without redirects
   // Only redirect if it's a real mobile device (not tablet) and trying to access canvas
   if (isMobile && !isTablet && pathname.startsWith('/canvas/') && !pathname.includes('mcanvas')) {
-    // Redirect to mobile canvas
+    // Redirect to mobile canvas with project ID
+    const projectId = pathname.split('/canvas/')[1]
     const url = request.nextUrl.clone()
     url.pathname = '/mcanvas'
+    if (projectId) {
+      url.searchParams.set('projectId', projectId)
+    }
     return NextResponse.redirect(url)
   }
   
-  // Redirect mobile users trying to access root to mcanvas
-  if (isMobile && !isTablet && pathname === '/') {
-    const url = request.nextUrl.clone()
-    url.pathname = '/mcanvas'
-    return NextResponse.redirect(url)
-  }
+  // Don't redirect mobile users from root - let them see the landing page
   
   return NextResponse.next()
 }
