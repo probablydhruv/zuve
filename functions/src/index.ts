@@ -89,12 +89,13 @@ Output:
     const prompts: Record<string, string> = {
       'Temple Jewellery': `${baseSketchToRender}
 
-Temple Jewellery (authentic, high‑detail)
-- Metal & Finish (RULE OVERRIDE): MUST be 22‑karat yellow gold with antique/reddish‑matte finish (override metalColor).
-- Sculptural, chunky, three‑dimensional.
+Temple Jewellery (authentic, high-detail)
+- Metal & Finish (RULE OVERRIDE): MUST be 22-karat yellow gold with antique/reddish-matte finish (override metalColor).
+- Sculptural, chunky, three-dimensional.
 - Traditional techniques: repoussé and granulation.
 - Motifs: temple figural/architectural (deities, peacocks, lotuses).
-- Gemstones (USER CHOICE): cabochon Kemp; default to cabochon red/green + pearls if unspecified.`.trim(),
+- Gemstones (USER CHOICE): cabochon Kemp; default to cabochon red/green + pearls if unspecified.
+- There are 4 Temple Jewellery reference images attached; follow their craft and styling closely.`.trim(),
 
       'Jadau Jewellery': `${baseSketchToRender}
 
@@ -137,6 +138,23 @@ Antique
     return (prompts[s] || baseSketchToRender) + legacy
   }
 
+  // Style-specific reference image URLs (served from your frontend or CDN)
+  // You can extend this with more styles later.
+  function getStyleReferenceImageUrls(s: string): string[] {
+    switch (s) {
+      case 'Temple Jewellery':
+        // Use your production domain or a stable CDN URL here
+        return [
+          'https://zuve-studio-app.vercel.app/Templeref1.jpeg',
+          'https://zuve-studio-app.vercel.app/Templeref2.jpeg',
+          'https://zuve-studio-app.vercel.app/Templeref3.jpeg',
+          'https://zuve-studio-app.vercel.app/Templeref4.jpeg',
+        ]
+      default:
+        return []
+    }
+  }
+
   const fullPrompt = buildStylePrompt(style)
 
   // Call Gemini image generation
@@ -150,16 +168,49 @@ Antique
     let generation
     try {
       const parts: any[] = []
+
+      // 1) User sketch as primary inline image
       if (sketchDataUrl && sketchDataUrl.startsWith('data:')) {
         const comma = sketchDataUrl.indexOf(',')
-        const mime = sketchDataUrl.substring(sketchDataUrl.indexOf(':') + 1, sketchDataUrl.indexOf(';')) || 'image/png'
+        const mime =
+          sketchDataUrl.substring(sketchDataUrl.indexOf(':') + 1, sketchDataUrl.indexOf(';')) || 'image/png'
         const b64 = sketchDataUrl.substring(comma + 1)
         parts.push({ inlineData: { data: b64, mimeType: mime } })
       }
+
+      // 2) Style-specific reference images (e.g. Temple refs)
+      const refUrls = getStyleReferenceImageUrls(style)
+      const gFetch: any = (globalThis as any).fetch
+      if (gFetch && refUrls.length > 0) {
+        for (const url of refUrls) {
+          try {
+            const resp = await gFetch(url)
+            if (!resp || !resp.ok) {
+              console.warn('Failed to fetch style reference image (non-OK response):', style, url)
+              continue
+            }
+            const arrayBuffer = await resp.arrayBuffer()
+            const refB64 = Buffer.from(arrayBuffer).toString('base64')
+            const refMime =
+              (resp.headers && resp.headers.get && resp.headers.get('content-type')) || 'image/jpeg'
+
+            parts.push({
+              inlineData: {
+                data: refB64,
+                mimeType: refMime,
+              },
+            })
+          } catch (e) {
+            console.warn('Failed to fetch style reference image:', style, url, e)
+          }
+        }
+      }
+
+      // 3) Text prompt
       parts.push({ text: fullPrompt })
 
       generation = await model.generateContent({
-        contents: [ { role: 'user', parts } ]
+        contents: [{ role: 'user', parts }]
       })
     } catch (error) {
       const errObj = error as unknown as {

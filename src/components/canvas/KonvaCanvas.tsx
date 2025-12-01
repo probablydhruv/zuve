@@ -25,13 +25,13 @@ const STONES = [
   { key: 'emerald', label: 'Emerald', icon: '🟢' },
   { key: 'amethyst', label: 'Amethyst', icon: '🟣' },
   { key: 'pearl', label: 'Pearl', icon: '⚪' },
-]
+] as const
 
 const SAPPHIRE_VARIANTS = [
   { key: 'sapphire_blue', label: 'Blue Sapphire', icon: '🔵' },
   { key: 'sapphire_yellow', label: 'Yellow Sapphire', icon: '🟡' },
   { key: 'sapphire_pink', label: 'Pink Sapphire', icon: '🩷' },
-]
+] as const
 
 const METALS = [
   { key: 'yellow_gold', label: 'Yellow Gold' },
@@ -1805,22 +1805,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
           })
         
         // Log if some images couldn't be saved yet (still uploading to Storage)
-        const pendingUploads = uploadedImages.filter(img => !img.storageUrl)
-        if (pendingUploads.length > 0) {
-          console.log(`${pendingUploads.length} image(s) still uploading to Storage, will save on next auto-save`)
-        }
-        
-        await saveCanvasData(user.uid, projectId, {
-          lines,
-          images: imagesToSave,
-          layers,
-          zoom,
-          canvasSize,
-          generatedImages,
-          insertedMotifs,
-          motifLayerMap,
-          imageLayerMap,
-        })
+
         console.log('Canvas auto-saved successfully')
       } catch (error: any) {
         console.error('Error auto-saving canvas:', error)
@@ -4112,6 +4097,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
           <Box
             onClick={async (e) => {
               e.stopPropagation()
+              // Turn on glow while Aura Assist is active
               setAuraAssistActive(true)
 
               const buttonRect = e.currentTarget.getBoundingClientRect()
@@ -4135,10 +4121,10 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                 const suggestion = (res.data?.suggestion || '').trim()
                 console.log('Aura Assist response length:', suggestion.length, 'text:', suggestion.substring(0, 100) + '...')
                 setAuraAssistPopup(prev => ({ ...prev, text: suggestion || 'No suggestion available.' }))
+                setAuraAssistActive(false)
               } catch (err) {
                 const msg = err instanceof Error ? err.message : 'Unable to fetch suggestion.'
                 setAuraAssistPopup(prev => ({ ...prev, text: msg }))
-              } finally {
                 setAuraAssistActive(false)
               }
             }}
@@ -4267,7 +4253,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                   linear-gradient(90deg, rgba(102, 126, 234, 0.4) 0%, transparent 15%, transparent 85%, rgba(102, 126, 234, 0.4) 100%),
                   linear-gradient(0deg, rgba(102, 126, 234, 0.4) 0%, transparent 15%, transparent 85%, rgba(102, 126, 234, 0.4) 100%)
                 `,
-                animation: 'auraPulse 1.5s ease-in-out',
+                animation: 'auraPulse 1.5s ease-in-out infinite',
                 '@keyframes auraPulse': {
                   '0%': {
                     opacity: 0,
