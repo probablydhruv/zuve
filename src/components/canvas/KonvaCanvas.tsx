@@ -15,7 +15,7 @@ import UsageBar, { VersionDisplay } from './UsageBar'
 import { UsageData, handleRequest, getCurrentUsageStatus, TierType } from '@/lib/usageTracker'
 import { InteractiveHoverButton } from '@/components/ui/interactive-hover-button'
 import { functions as firebaseFunctions } from '@/lib/firebaseClient'
-import { getCanvasData, saveCanvasData, getUserMotifs, saveUserMotif, deleteUserMotif, Motif, uploadCanvasImage, deleteCanvasImage } from '@/lib/firestore'
+import { getCanvasData, saveCanvasData, getUserMotifs, saveUserMotif, deleteUserMotif, Motif, uploadCanvasImage, deleteCanvasImage, uploadSignatureStyleImage } from '@/lib/firestore'
 
 const STONES = [
   { key: 'none', label: 'None', icon: '⚪' },
@@ -99,6 +99,7 @@ type GenerateDesignImagePayload = {
   primaryStone?: string
   secondaryStone?: string
   userContext?: string
+  signatureStyleUrls?: string[]
 }
 
 type GenerateDesignImageResponse = {
@@ -320,14 +321,14 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
   const [rightDrawerOpen, setRightDrawerOpen] = useState(false)
 
   // Motif Browser states
-  const [motifs, setMotifs] = useState<Array<{id: string, name: string, data: string}>>([])
+  const [motifs, setMotifs] = useState<Array<{ id: string, name: string, data: string }>>([])
   const [isCreatingMotif, setIsCreatingMotif] = useState(false)
   const [motifDrawingLines, setMotifDrawingLines] = useState<number[]>([])
   const [insertedMotifs, setInsertedMotifs] = useState<any[]>([])
   const [selectedMotifId, setSelectedMotifId] = useState<string | null>(null)
 
-  // Signature Style states
-  const [signatureStyles, setSignatureStyles] = useState<Array<{id: string, name: string, url: string}>>([])
+  // Signature Style states (local preview URL + optional Firebase Storage URL for AI reference)
+  const [signatureStyles, setSignatureStyles] = useState<Array<{ id: string; name: string; url: string; storageUrl?: string }>>([])
 
   // Usage tracking with tier support
   const [usageData, setUsageData] = useState<UsageData>(() => {
@@ -353,7 +354,14 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
   
   // Function to change user tier (can be called when user upgrades/downgrades)
   const setUserTier = useCallback((newTier: TierType) => {
-    const newUsageData = { ...usageData, tier: newTier }
+    // When tier changes (e.g. upgrading to Pro), clear any existing cooldown
+    // and keep the existing usage events so the new tier still respects history.
+    const newUsageData: UsageData = { 
+      ...usageData, 
+      tier: newTier,
+      cooldownUntil: undefined 
+    }
+
     setUsageData(newUsageData)
     setUsageStatus(getCurrentUsageStatus(newUsageData))
     
@@ -362,7 +370,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
       localStorage.setItem('zuve-usage-data', JSON.stringify(newUsageData))
     }
     
-    console.log('User tier updated to:', newTier)
+    console.log('User tier updated to:', newTier, 'and cooldown cleared')
   }, [usageData])
   
   // Sync tier from Firebase auth when it changes
@@ -424,6 +432,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
     const primaryStoneInfo = findStoneDetails(primaryStone)
     const secondaryStoneInfo = secondaryStone ? findStoneDetails(secondaryStone) : null
     const metalLabel = METALS.find(m => m.key === metal)?.label ?? metal
+    const hasSignatureStyles = signatureStyles.some(style => !!style.storageUrl)
 
     if (action === 'generate') {
       const generateParts = [
@@ -435,6 +444,9 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
         `The jewellery render should have the metal color as: ${metalLabel}.`,
         selectedJewelleryStyle
           ? `Very importantly the following is the Design style which we need to understand and inculcate in the jewellery render based on the sketch drawn by the user: ${selectedJewelleryStyle}.`
+          : null,
+        hasSignatureStyles
+          ? 'The user has provided up to 4 signature style reference images. Please strongly follow these styles when designing the jewellery from the sketch.'
           : null,
         `Campaign style: ${selectedStyle}.`,
         `Target region: ${selectedRegion}.`,
@@ -473,7 +485,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
     ]
 
     return parts.filter(Boolean).join('\n')
-  }, [primaryStone, secondaryStone, metal, canvasInfluence, selectedJewelleryStyle, selectedHarmonizeOptions, selectedStyle, selectedRegion, contextText, contentDetails])
+  }, [primaryStone, secondaryStone, metal, canvasInfluence, selectedJewelleryStyle, selectedHarmonizeOptions, selectedStyle, selectedRegion, contextText, contentDetails, signatureStyles])
 
   const callDesignFunction = useCallback(async (action: 'generate' | 'harmonize') => {
     if (!projectId) {
@@ -524,7 +536,8 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
         metalColor: metal || undefined,
         primaryStone: primaryStone || undefined,
         secondaryStone: secondaryStone || undefined,
-        userContext: (contextText || '').trim() || undefined
+        userContext: (contextText || '').trim() || undefined,
+        signatureStyleUrls: signatureStyles.filter(s => !!s.storageUrl).map(s => s.storageUrl as string),
       })
 
       const data = response.data
@@ -781,18 +794,39 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
     const reader = new FileReader()
     reader.onload = (e) => {
       const imageUrl = e.target?.result as string
+      const id = `sig_${Date.now()}`
       const newSignatureStyle = {
-        id: `sig_${Date.now()}`,
+        id,
         name: file.name.replace(/\.[^/.]+$/, ""), // Remove file extension
-        url: imageUrl
+        url: imageUrl,
       }
       
       setSignatureStyles(prev => [...prev, newSignatureStyle])
       console.log('Added signature style:', newSignatureStyle.name)
+
+      // Asynchronously upload to Firebase Storage so AI can use it as a reference image
+      if (user?.uid && projectId) {
+        uploadSignatureStyleImage(user.uid, projectId, id, imageUrl)
+          .then((storageUrl) => {
+            setSignatureStyles(prev => prev.map(style =>
+              style.id === id ? { ...style, storageUrl } : style
+            ))
+            console.log('Signature style uploaded to Storage:', id)
+          })
+          .catch((error) => {
+            console.error('Error uploading signature style to Storage:', error)
+            setSnackbar({
+              message: 'Signature style image could not be uploaded. It will not be used as an AI reference until upload succeeds.',
+              severity: 'error'
+            })
+          })
+      } else {
+        console.warn('Cannot upload signature style: missing user or project context')
+      }
     }
     
     reader.readAsDataURL(file)
-  }, [signatureStyles.length])
+  }, [signatureStyles.length, user?.uid, projectId])
 
   const removeSignatureStyle = useCallback((id: string) => {
     setSignatureStyles(prev => prev.filter(style => style.id !== id))
@@ -801,7 +835,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
 
 
   // Helper function to render motif preview
-  const renderMotifPreview = useCallback((motif: {id: string, name: string, data: string}) => {
+  const renderMotifPreview = useCallback((motif: { id: string, name: string, data: string }) => {
     try {
       const motifPoints = JSON.parse(motif.data) as number[]
       
@@ -898,30 +932,30 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
     return new Promise((resolve) => {
       const maxWidth = 800
       const quality = 0.6
-      
+
       let width = imageElement.width
       let height = imageElement.height
-      
+
       // Only compress if larger than maxWidth
       if (width > maxWidth) {
         height = (height * maxWidth) / width
         width = maxWidth
       }
-      
+
       // Create canvas and draw resized image
       const canvas = document.createElement('canvas')
       canvas.width = width
       canvas.height = height
-      
+
       const ctx = canvas.getContext('2d')
       if (!ctx) {
         console.warn('Failed to get canvas context, using original image')
         resolve(dataUrl)
         return
       }
-      
+
       ctx.drawImage(imageElement, 0, 0, width, height)
-      
+
       // Convert to compressed JPEG
       const compressedDataUrl = canvas.toDataURL('image/jpeg', quality)
       console.log(`Image compressed: ${(dataUrl.length / 1024).toFixed(1)}KB -> ${(compressedDataUrl.length / 1024).toFixed(1)}KB`)
@@ -1034,7 +1068,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
         
         // Automatically switch to hand tool after image upload
         setTool('hand')
-        
+
         // Compress and store for persistence
         if (user?.uid && projectId) {
           // First try Firebase Storage
@@ -1042,7 +1076,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
             .then((storageUrl) => {
               console.log('Image uploaded to Storage:', storageUrl)
               // Update the image with the storage URL
-              setUploadedImages(prev => prev.map(imgItem => 
+              setUploadedImages(prev => prev.map(imgItem =>
                 imgItem.id === imageId ? { ...imgItem, storageUrl } : imgItem
               ))
             })
@@ -1053,7 +1087,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                 const compressedUrl = await compressImage(img, imageUrl)
                 // Check if compressed image is small enough for Firestore (< 900KB)
                 if (compressedUrl.length < 900000) {
-                  setUploadedImages(prev => prev.map(imgItem => 
+                  setUploadedImages(prev => prev.map(imgItem =>
                     imgItem.id === imageId ? { ...imgItem, storageUrl: compressedUrl } : imgItem
                   ))
                   console.log('Using compressed data URL for storage')
@@ -1126,7 +1160,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
   const removeImage = useCallback((imageId: string) => {
     // Find the image to check if it has a storage URL
     const imageToRemove = uploadedImages.find(img => img.id === imageId)
-    
+
     setUploadedImages(prev => prev.filter(img => img.id !== imageId))
     setImageElements(prev => {
       const newElements = { ...prev }
@@ -1140,7 +1174,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
         transformerRef.current.getLayer().batchDraw()
       }
     }
-    
+
     // Delete from Firebase Storage if it was uploaded there
     if (imageToRemove?.storageUrl && user?.uid && projectId) {
       deleteCanvasImage(user.uid, projectId, imageId)
@@ -1651,24 +1685,24 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
             console.log('Restoring', savedData.images.length, 'uploaded images')
             const imagesToRestore: any[] = []
             const imageElementsToRestore: { [key: string]: HTMLImageElement } = {}
-            
+
             // Process each image
             const imagePromises = savedData.images.map((img: any) => {
               return new Promise<void>((resolve) => {
                 // Use storageUrl (new format) or dataUrl (legacy format)
                 const imageUrl = img.storageUrl || img.dataUrl
                 const { dataUrl, storageUrl, ...imageData } = img
-                
+
                 if (!imageUrl) {
                   console.warn('Image missing URL, skipping:', img.id)
                   resolve()
                   return
                 }
-                
+
                 // Create HTMLImageElement from URL
                 const imgElement = new Image()
                 imgElement.crossOrigin = 'anonymous'
-                
+
                 imgElement.onload = () => {
                   // Include storageUrl in the restored image data
                   imagesToRestore.push({ ...imageData, storageUrl: storageUrl || null })
@@ -1676,16 +1710,16 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                   console.log('Restored image:', imageData.id, 'from', storageUrl ? 'Storage' : 'dataUrl')
                   resolve()
                 }
-                
+
                 imgElement.onerror = (error) => {
                   console.error('Failed to restore image:', imageData.id, error)
                   resolve() // Continue with other images even if one fails
                 }
-                
+
                 imgElement.src = imageUrl
               })
             })
-            
+
             // Wait for all images to load, then update state
             Promise.all(imagePromises).then(() => {
               if (imagesToRestore.length > 0) {
@@ -1777,7 +1811,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
               originalHeight: Number(img.originalHeight) || 0,
               storageUrl: String(img.storageUrl), // Use storage URL instead of base64
             }
-            
+
             // Include optional properties if they exist and are serializable
             if (img.usePolygonMask === true || img.usePolygonMask === false) {
               cleanImage.usePolygonMask = Boolean(img.usePolygonMask)
@@ -1803,7 +1837,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
             }
             return cleanImage
           })
-        
+
         // Log if some images couldn't be saved yet (still uploading to Storage)
 
         console.log('Canvas auto-saved successfully')
@@ -1888,7 +1922,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
     setShowClearAllDialog(false)
   }, [saveToHistory])
 
-  const insertMotif = useCallback((motif: {id: string, name: string, data: string}) => {
+  const insertMotif = useCallback((motif: { id: string, name: string, data: string }) => {
     console.log('insertMotif called with:', motif.name, 'Data:', motif.data.substring(0, 100) + '...')
     try {
       const motifPoints = JSON.parse(motif.data) as number[]
@@ -2475,49 +2509,49 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
     const isPinchGesture = e.evt.ctrlKey || e.evt.metaKey
     
     // Allow zoom with regular mouse wheel OR pinch gesture
-    e.evt.preventDefault()
-    
-    const stage = e.target.getStage()
-    if (!stage) return
-    
-    // Get pointer position in container coordinates (unscaled)
-    const pointerPos = stage.getPointerPosition()
-    if (!pointerPos) return
-    
-    // Get current stage position and zoom
-    const oldZoom = zoom
-    const oldStageX = stage.x()
-    const oldStageY = stage.y()
-    
-    // Calculate zoom delta
-    // Negative deltaY = zoom in, positive deltaY = zoom out
+      e.evt.preventDefault()
+      
+      const stage = e.target.getStage()
+      if (!stage) return
+      
+      // Get pointer position in container coordinates (unscaled)
+      const pointerPos = stage.getPointerPosition()
+      if (!pointerPos) return
+      
+      // Get current stage position and zoom
+      const oldZoom = zoom
+      const oldStageX = stage.x()
+      const oldStageY = stage.y()
+      
+      // Calculate zoom delta
+      // Negative deltaY = zoom in, positive deltaY = zoom out
     // Use different sensitivity for regular wheel vs pinch
     const zoomSpeed = isPinchGesture ? 0.01 : 0.05 // More sensitive for regular mouse wheel
-    const zoomDelta = -e.evt.deltaY * zoomSpeed
-    
-    // Calculate new zoom with constraints
-    const newZoom = Math.max(minZoom, Math.min(maxZoom, oldZoom + zoomDelta))
-    
-    // If zoom didn't change, don't update
-    if (newZoom === oldZoom) return
-    
-    // If zooming out to 100% (minZoom), reset to centered position
-    if (newZoom === minZoom) {
+      const zoomDelta = -e.evt.deltaY * zoomSpeed
+      
+      // Calculate new zoom with constraints
+      const newZoom = Math.max(minZoom, Math.min(maxZoom, oldZoom + zoomDelta))
+      
+      // If zoom didn't change, don't update
+      if (newZoom === oldZoom) return
+      
+      // If zooming out to 100% (minZoom), reset to centered position
+      if (newZoom === minZoom) {
+        setZoom(newZoom)
+        stage.x(0)
+        stage.y(0)
+        return
+      }
+      
+      // For zooming in, keep the point under cursor fixed
+      // Formula: newPos = oldPos - (pointerPos - oldPos) * (newZoom - oldZoom) / oldZoom
+      const newStageX = oldStageX - (pointerPos.x - oldStageX) * (newZoom - oldZoom) / oldZoom
+      const newStageY = oldStageY - (pointerPos.y - oldStageY) * (newZoom - oldZoom) / oldZoom
+      
+      // Update zoom and stage position
       setZoom(newZoom)
-      stage.x(0)
-      stage.y(0)
-      return
-    }
-    
-    // For zooming in, keep the point under cursor fixed
-    // Formula: newPos = oldPos - (pointerPos - oldPos) * (newZoom - oldZoom) / oldZoom
-    const newStageX = oldStageX - (pointerPos.x - oldStageX) * (newZoom - oldZoom) / oldZoom
-    const newStageY = oldStageY - (pointerPos.y - oldStageY) * (newZoom - oldZoom) / oldZoom
-    
-    // Update zoom and stage position
-    setZoom(newZoom)
-    stage.x(newStageX)
-    stage.y(newStageY)
+      stage.x(newStageX)
+      stage.y(newStageY)
   }
 
   // Floating toolbar drag handlers
@@ -2715,27 +2749,27 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
         </Box>
         <List dense sx={{ flex: 1, overflowY: 'auto', px: 1 }}>
           {layers.map(l => (
-                    <ListItem 
-                      key={l.id} 
-                      onClick={(e) => {
-                        // Don't switch layer if clicking on buttons or text field
-                        if ((e.target as HTMLElement).closest('button') || (e.target as HTMLElement).closest('input')) {
-                          return
-                        }
-                        console.log('Switching to layer:', l.id)
-                        setActiveLayerId(l.id)
-                      }}
-                      onDoubleClick={(e) => {
-                        // Don't start editing if clicking on buttons
-                        if ((e.target as HTMLElement).closest('button')) {
-                          return
-                        }
-                        e.stopPropagation()
-                        setEditingLayerId(l.id)
-                        setEditingLayerName(l.name)
-                      }}
-                      sx={{ cursor: 'pointer', border: '1px solid rgba(0,0,0,0.08)', borderRadius: 1, mb: 0.5, backgroundColor: l.id === activeLayerId ? 'action.selected' : 'transparent' }}
-                    >
+            <ListItem
+              key={l.id}
+              onClick={(e) => {
+                // Don't switch layer if clicking on buttons or text field
+                if ((e.target as HTMLElement).closest('button') || (e.target as HTMLElement).closest('input')) {
+                  return
+                }
+                      console.log('Switching to layer:', l.id)
+                      setActiveLayerId(l.id)
+              }}
+              onDoubleClick={(e) => {
+                // Don't start editing if clicking on buttons
+                if ((e.target as HTMLElement).closest('button')) {
+                  return
+                }
+                e.stopPropagation()
+                setEditingLayerId(l.id)
+                setEditingLayerName(l.name)
+              }}
+              sx={{ cursor: 'pointer', border: '1px solid rgba(0,0,0,0.08)', borderRadius: 1, mb: 0.5, backgroundColor: l.id === activeLayerId ? 'action.selected' : 'transparent' }}
+            >
               {editingLayerId === l.id ? (
                 <TextField
                   value={editingLayerName}
@@ -2764,7 +2798,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                   autoFocus
                   size="small"
                   variant="standard"
-                  sx={{ 
+                  sx={{
                     flex: 1,
                     '& .MuiInputBase-input': {
                       fontSize: '0.875rem',
@@ -2773,7 +2807,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                   }}
                 />
               ) : (
-                <ListItemText primary={l.name} />
+              <ListItemText primary={l.name} />
               )}
               <ListItemSecondaryAction>
                 <IconButton edge="end" size="small" onClick={(e) => {
@@ -2788,14 +2822,14 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                     e.stopPropagation()
                     // Delete layer and remove all content from that layer
                     setLayers(prev => prev.filter(x => x.id !== l.id))
-                    
+
                     // Delete all lines from this layer
                     setLineLayerMap(currentLineLayerMap => {
                       setLines(prev => {
                         const newLines: any[] = []
                         const newLineLayerMap: { [key: number]: string } = {}
                         let newIndex = 0
-                        
+
                         prev.forEach((line, oldIndex) => {
                           const lineLayerId = currentLineLayerMap[oldIndex]
                           // Only keep lines that are NOT on the deleted layer
@@ -2806,14 +2840,14 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                             newIndex++
                           }
                         })
-                        
+
                         return newLines
                       })
                       // Return the new lineLayerMap
                       const newLineLayerMap: { [key: number]: string } = {}
                       let newIndex = 0
                       Object.keys(currentLineLayerMap).forEach(key => {
-                        const numKey = parseInt(key)
+                          const numKey = parseInt(key)
                         if (currentLineLayerMap[numKey] !== l.id) {
                           newLineLayerMap[newIndex] = currentLineLayerMap[numKey]
                           newIndex++
@@ -2821,7 +2855,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                       })
                       return newLineLayerMap
                     })
-                    
+
                     // Delete all images from this layer
                     setImageLayerMap(currentImageLayerMap => {
                       setUploadedImages(prev => {
@@ -2829,41 +2863,41 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                         // Delete images from Storage if they were uploaded
                         imagesToDelete.forEach(img => {
                           if (img.storageUrl && user?.uid && projectId) {
-                            deleteCanvasImage(user.uid, projectId, img.id).catch(err => 
+                            deleteCanvasImage(user.uid, projectId, img.id).catch(err =>
                               console.error('Failed to delete image from Storage:', err)
                             )
                           }
                         })
                         return prev.filter(img => currentImageLayerMap[img.id] !== l.id)
                       })
-                      
+
                       // Clean up imageLayerMap
                       const newMap = { ...currentImageLayerMap }
-                      Object.keys(newMap).forEach(key => {
-                        if (newMap[key] === l.id) {
+                        Object.keys(newMap).forEach(key => {
+                          if (newMap[key] === l.id) {
                           delete newMap[key]
-                        }
+                          }
+                        })
+                        return newMap
                       })
-                      return newMap
-                    })
-                    
+
                     // Delete all motifs from this layer
                     setMotifLayerMap(currentMotifLayerMap => {
                       setInsertedMotifs(prev => prev.filter(motif => {
                         const motifLayerId = currentMotifLayerMap[motif.id]
                         return motifLayerId !== l.id
                       }))
-                      
+
                       // Clean up motifLayerMap
                       const newMap = { ...currentMotifLayerMap }
-                      Object.keys(newMap).forEach(key => {
-                        if (newMap[key] === l.id) {
+                        Object.keys(newMap).forEach(key => {
+                          if (newMap[key] === l.id) {
                           delete newMap[key]
-                        }
+                          }
+                        })
+                        return newMap
                       })
-                      return newMap
-                    })
-                    
+
                     // Set active layer to the first remaining layer
                     const remainingLayers = layers.filter(x => x.id !== l.id)
                     if (remainingLayers.length > 0) {
@@ -2970,9 +3004,9 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
           <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mt: 2, mb: 1 }}>
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
               <Tooltip title="Sets how much the AI should stick to your sketch. 100% follows it exactly, lower percentages allow more AI interpretation.">
-                <Typography 
-                  variant="subtitle2" 
-                  sx={{ 
+                <Typography
+                  variant="subtitle2"
+                  sx={{
                     textDecoration: 'underline',
                     textDecorationStyle: 'dotted',
                     textDecorationColor: 'rgba(0, 0, 0, 0.5)',
@@ -3738,14 +3772,14 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                   y: canvasSize.height / 2
                 })}
                 name="compare-handle"
-                onMouseEnter={() => { try { stageRef.current?.container().style.setProperty('cursor', 'grab') } catch {} }}
-                onMouseLeave={() => { try { stageRef.current?.container().style.setProperty('cursor', 'default') } catch {} }}
-                onMouseDown={(e) => { e.cancelBubble = true; (e as any).evt?.preventDefault?.(); isComparePointerActiveRef.current = true; try { stageRef.current?.container().style.setProperty('cursor', 'grabbing') } catch {} }}
+                  onMouseEnter={() => { try { stageRef.current?.container().style.setProperty('cursor', 'grab') } catch { } }}
+                  onMouseLeave={() => { try { stageRef.current?.container().style.setProperty('cursor', 'default') } catch { } }}
+                  onMouseDown={(e) => { e.cancelBubble = true; (e as any).evt?.preventDefault?.(); isComparePointerActiveRef.current = true; try { stageRef.current?.container().style.setProperty('cursor', 'grabbing') } catch { } }}
                 onTouchStart={(e) => { e.cancelBubble = true; (e as any).evt?.preventDefault?.(); isComparePointerActiveRef.current = true }}
                 onMouseUp={(e) => { e.cancelBubble = true; isComparePointerActiveRef.current = false }}
                 onTouchEnd={(e) => { e.cancelBubble = true; isComparePointerActiveRef.current = false }}
-                onDragStart={(e) => { (e as any).evt?.preventDefault?.(); isComparePointerActiveRef.current = true; try { stageRef.current?.container().style.setProperty('cursor', 'grabbing') } catch {} }}
-                onDragEnd={() => { isComparePointerActiveRef.current = false; try { stageRef.current?.container().style.setProperty('cursor', 'grab') } catch {} }}
+                  onDragStart={(e) => { (e as any).evt?.preventDefault?.(); isComparePointerActiveRef.current = true; try { stageRef.current?.container().style.setProperty('cursor', 'grabbing') } catch { } }}
+                  onDragEnd={() => { isComparePointerActiveRef.current = false; try { stageRef.current?.container().style.setProperty('cursor', 'grab') } catch { } }}
                 onDragMove={(e) => { (e as any).evt?.preventDefault?.(); scheduleCompareXUpdate(e.target.x()) }}
               >
                 {/* Larger invisible hit area to make grabbing easier */}
@@ -3785,16 +3819,48 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
           )}
         </Stage>
 
-        {/* Toggle button to switch between rendered and harmonized images */}
-        {showCanvasCompare && renderedImageUrl && harmonizedImageUrl && (
+          {/* Remove image button - appears when any image is displayed */}
+          {currentViewImageUrl && (
           <Box
             sx={{
               position: 'absolute',
-              top: 80,
-              right: 20,
+                top: 20,
+                left: 20,
               zIndex: 1000,
-              display: 'flex',
-              gap: 1,
+              }}
+            >
+              <Tooltip title="Remove image from canvas">
+                <IconButton
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    e.preventDefault()
+                    setCurrentViewImageUrl(null)
+                    setShowCanvasCompare(false)
+                    setGeneratedImageElement(null)
+                  }}
+                  sx={{
+                    bgcolor: 'background.paper',
+                    border: '1px solid',
+                    borderColor: 'divider',
+                    boxShadow: '0 2px 8px rgba(0,0,0,0.15)',
+                    '&:hover': {
+                      bgcolor: 'error.main',
+                      color: 'error.contrastText',
+                      boxShadow: '0 4px 12px rgba(0,0,0,0.2)',
+                    },
+                    width: 36,
+                    height: 36,
+                  }}
+                >
+                  <Close fontSize="small" />
+                </IconButton>
+              </Tooltip>
+
+              {/* Toggle button to switch between rendered and harmonized images, positioned just below the X */}
+              {showCanvasCompare && renderedImageUrl && harmonizedImageUrl && (
+                <Box
+                  sx={{
+                    mt: 1, // space below the X button
             }}
           >
             <Tooltip title={currentViewImageUrl === harmonizedImageUrl ? 'Switch to Rendered' : 'Switch to Harmonized'}>
@@ -3822,45 +3888,8 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                 <SwapHoriz fontSize="small" />
               </IconButton>
             </Tooltip>
-          </Box>
-        )}
-
-        {/* Remove image button - appears when any image is displayed */}
-        {currentViewImageUrl && (
-          <Box
-            sx={{
-              position: 'absolute',
-              top: 20,
-              left: 20,
-              zIndex: 1000,
-            }}
-          >
-            <Tooltip title="Remove image from canvas">
-              <IconButton
-                onClick={(e) => {
-                  e.stopPropagation()
-                  e.preventDefault()
-                  setCurrentViewImageUrl(null)
-                  setShowCanvasCompare(false)
-                  setGeneratedImageElement(null)
-                }}
-                sx={{
-                  bgcolor: 'background.paper',
-                  border: '1px solid',
-                  borderColor: 'divider',
-                  boxShadow: '0 2px 8px rgba(0,0,0,0.15)',
-                  '&:hover': {
-                    bgcolor: 'error.main',
-                    color: 'error.contrastText',
-                    boxShadow: '0 4px 12px rgba(0,0,0,0.2)',
-                  },
-                  width: 36,
-                  height: 36,
-                }}
-              >
-                <Close fontSize="small" />
-              </IconButton>
-            </Tooltip>
+                </Box>
+              )}
           </Box>
         )}
         </Box>
@@ -4196,41 +4225,6 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
           </Box>
         </Tooltip>
 
-        {/* Download Button - appears when image is generated */}
-        {(renderedImageUrl || harmonizedImageUrl) && (
-          <Tooltip title="Download Image">
-            <IconButton
-              onClick={(e) => {
-                e.stopPropagation()
-                handleDownloadImage()
-              }}
-              sx={{
-                position: 'absolute',
-                top: 20,
-                right: 70,
-                width: 40,
-                height: 40,
-                borderRadius: '50%',
-                background: 'linear-gradient(135deg, #4CAF50 0%, #45a049 100%)',
-                color: 'white',
-                boxShadow: '0 4px 12px rgba(76, 175, 80, 0.4)',
-                border: '2px solid rgba(255, 255, 255, 0.2)',
-                transition: 'all 0.3s ease',
-                '&:hover': {
-                  transform: 'scale(1.1)',
-                  boxShadow: '0 6px 20px rgba(76, 175, 80, 0.6)',
-                  background: 'linear-gradient(135deg, #45a049 0%, #3d8b40 100%)',
-                },
-                '&:active': {
-                  transform: 'scale(0.95)',
-                }
-              }}
-            >
-              <Download sx={{ fontSize: '1.2rem' }} />
-            </IconButton>
-          </Tooltip>
-        )}
-
         {/* Pulsing Edge Effect */}
         {auraAssistActive && (
           <Box
@@ -4321,23 +4315,21 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
             <Box
               sx={{
                 maxHeight: '300px',
-                overflowY: 'auto',
+                overflowY: 'scroll',
                 overflowX: 'hidden',
-                pr: 0.5,
-                // Custom scrollbar styling
+                pr: 0.75,
+                // More visible scrollbar styling
                 '&::-webkit-scrollbar': {
-                  width: '6px',
+                  width: '10px',
                 },
                 '&::-webkit-scrollbar-track': {
-                  background: 'rgba(255, 255, 255, 0.1)',
-                  borderRadius: '3px',
+                  background: 'rgba(0, 0, 0, 0.25)',
+                  borderRadius: '5px',
                 },
                 '&::-webkit-scrollbar-thumb': {
-                  background: 'rgba(255, 255, 255, 0.3)',
-                  borderRadius: '3px',
-                  '&:hover': {
-                    background: 'rgba(255, 255, 255, 0.5)',
-                  },
+                  background: 'rgba(255, 255, 255, 0.85)',
+                  borderRadius: '5px',
+                  border: '2px solid rgba(0, 0, 0, 0.35)',
                 },
               }}
             >
@@ -4637,7 +4629,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                 onClose={() => setHarmonizeOptionsAnchor(null)}
                 PaperProps={{ sx: { mt: 0.5, minWidth: 160, borderRadius: 1, p: 0 } }}
               >
-                {['Ring','Earring','Necklace','Bracelet','Bangles','Pendant'].map((opt) => {
+                  {['Ring', 'Earring', 'Necklace', 'Bracelet', 'Bangles', 'Pendant'].map((opt) => {
                   const checked = selectedHarmonizeOptions.includes(opt)
                   return (
                     <MenuItem
@@ -5202,6 +5194,9 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                 <Typography variant="subtitle2" sx={{ fontWeight: 'bold', mb: 1 }}>
                   Signature Styles ({signatureStyles.length}/4)
                 </Typography>
+                <Typography variant="caption" sx={{ color: 'text.secondary', mb: 1 }}>
+                  These images will be sent to the AI as style reference when you generate or harmonize.
+                </Typography>
                 
                 <Button
                   component="label"
@@ -5596,27 +5591,27 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
           </Box>
           <List dense sx={{ flex: 1, overflowY: 'auto', px: 1 }}>
             {layers.map(l => (
-                    <ListItem 
-                      key={l.id} 
-                      onClick={(e) => {
-                        // Don't switch layer if clicking on buttons or text field
-                        if ((e.target as HTMLElement).closest('button') || (e.target as HTMLElement).closest('input')) {
-                          return
-                        }
-                        console.log('Mobile: Switching to layer:', l.id)
-                        setActiveLayerId(l.id)
-                      }}
-                      onDoubleClick={(e) => {
-                        // Don't start editing if clicking on buttons
-                        if ((e.target as HTMLElement).closest('button')) {
-                          return
-                        }
-                        e.stopPropagation()
-                        setEditingLayerId(l.id)
-                        setEditingLayerName(l.name)
-                      }}
-                      sx={{ cursor: 'pointer', border: '1px solid rgba(0,0,0,0.08)', borderRadius: 1, mb: 0.5, backgroundColor: l.id === activeLayerId ? 'action.selected' : 'transparent' }}
-                    >
+              <ListItem
+                key={l.id}
+                onClick={(e) => {
+                  // Don't switch layer if clicking on buttons or text field
+                  if ((e.target as HTMLElement).closest('button') || (e.target as HTMLElement).closest('input')) {
+                    return
+                  }
+                      console.log('Mobile: Switching to layer:', l.id)
+                      setActiveLayerId(l.id)
+                }}
+                onDoubleClick={(e) => {
+                  // Don't start editing if clicking on buttons
+                  if ((e.target as HTMLElement).closest('button')) {
+                    return
+                  }
+                  e.stopPropagation()
+                  setEditingLayerId(l.id)
+                  setEditingLayerName(l.name)
+                }}
+                sx={{ cursor: 'pointer', border: '1px solid rgba(0,0,0,0.08)', borderRadius: 1, mb: 0.5, backgroundColor: l.id === activeLayerId ? 'action.selected' : 'transparent' }}
+              >
                 {editingLayerId === l.id ? (
                   <TextField
                     value={editingLayerName}
@@ -5645,7 +5640,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                     autoFocus
                     size="small"
                     variant="standard"
-                    sx={{ 
+                    sx={{
                       flex: 1,
                       '& .MuiInputBase-input': {
                         fontSize: '0.875rem',
@@ -5654,7 +5649,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                     }}
                   />
                 ) : (
-                  <ListItemText primary={l.name} />
+                <ListItemText primary={l.name} />
                 )}
                 <ListItemSecondaryAction>
                   <IconButton edge="end" size="small" onClick={(e) => {
@@ -5669,13 +5664,13 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                       e.stopPropagation()
                       // Delete layer and remove all content from that layer
                       setLayers(prev => prev.filter(x => x.id !== l.id))
-                      
+
                       // Delete all lines from this layer
                       setLineLayerMap(currentLineLayerMap => {
                         setLines(prev => {
                           const newLines: any[] = []
                           let newIndex = 0
-                          
+
                           prev.forEach((line, oldIndex) => {
                             const lineLayerId = currentLineLayerMap[oldIndex]
                             // Only keep lines that are NOT on the deleted layer
@@ -5684,14 +5679,14 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                               newIndex++
                             }
                           })
-                          
+
                           return newLines
                         })
                         // Return the new lineLayerMap
                         const newLineLayerMap: { [key: number]: string } = {}
                         let newIndex = 0
                         Object.keys(currentLineLayerMap).forEach(key => {
-                          const numKey = parseInt(key)
+                            const numKey = parseInt(key)
                           if (currentLineLayerMap[numKey] !== l.id) {
                             newLineLayerMap[newIndex] = currentLineLayerMap[numKey]
                             newIndex++
@@ -5699,7 +5694,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                         })
                         return newLineLayerMap
                       })
-                      
+
                       // Delete all images from this layer
                       setImageLayerMap(currentImageLayerMap => {
                         setUploadedImages(prev => {
@@ -5707,41 +5702,41 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                           // Delete images from Storage if they were uploaded
                           imagesToDelete.forEach(img => {
                             if (img.storageUrl && user?.uid && projectId) {
-                              deleteCanvasImage(user.uid, projectId, img.id).catch(err => 
+                              deleteCanvasImage(user.uid, projectId, img.id).catch(err =>
                                 console.error('Failed to delete image from Storage:', err)
                               )
                             }
                           })
                           return prev.filter(img => currentImageLayerMap[img.id] !== l.id)
                         })
-                        
+
                         // Clean up imageLayerMap
                         const newMap = { ...currentImageLayerMap }
                         Object.keys(newMap).forEach(key => {
                           if (newMap[key] === l.id) {
                             delete newMap[key]
-                          }
+                            }
+                          })
+                          return newMap
                         })
-                        return newMap
-                      })
-                      
+
                       // Delete all motifs from this layer
                       setMotifLayerMap(currentMotifLayerMap => {
                         setInsertedMotifs(prev => prev.filter(motif => {
                           const motifLayerId = currentMotifLayerMap[motif.id]
                           return motifLayerId !== l.id
                         }))
-                        
+
                         // Clean up motifLayerMap
                         const newMap = { ...currentMotifLayerMap }
-                        Object.keys(newMap).forEach(key => {
-                          if (newMap[key] === l.id) {
+                          Object.keys(newMap).forEach(key => {
+                            if (newMap[key] === l.id) {
                             delete newMap[key]
-                          }
+                            }
+                          })
+                          return newMap
                         })
-                        return newMap
-                      })
-                      
+
                       // Set active layer to the first remaining layer
                       const remainingLayers = layers.filter(x => x.id !== l.id)
                       if (remainingLayers.length > 0) {
@@ -5848,9 +5843,9 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
             <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mt: 2, mb: 1 }}>
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
                 <Tooltip title="Sets how much the AI should stick to your sketch. 100% follows it exactly, lower percentages allow more AI interpretation.">
-                  <Typography 
-                    variant="subtitle2" 
-                    sx={{ 
+                  <Typography
+                    variant="subtitle2"
+                    sx={{
                       textDecoration: 'underline',
                       textDecorationStyle: 'dotted',
                       cursor: 'help'
@@ -7049,13 +7044,13 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
           zIndex: 1000,
           minWidth: { xs: 48, md: 56 },
           minHeight: { xs: 48, md: 56 },
-          bgcolor: theme.palette.mode === 'light' 
-            ? 'rgba(0, 0, 0, 0.08)' 
+          bgcolor: theme.palette.mode === 'light'
+            ? 'rgba(0, 0, 0, 0.08)'
             : 'rgba(255, 255, 255, 0.12)',
           color: theme.palette.text.primary,
           '&:hover': {
-            bgcolor: theme.palette.mode === 'light' 
-              ? 'rgba(0, 0, 0, 0.12)' 
+            bgcolor: theme.palette.mode === 'light'
+              ? 'rgba(0, 0, 0, 0.12)'
               : 'rgba(255, 255, 255, 0.18)'
           }
         }}
@@ -7072,13 +7067,13 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
           zIndex: 1000,
           minWidth: { xs: 48, md: 56 },
           minHeight: { xs: 48, md: 56 },
-          bgcolor: theme.palette.mode === 'light' 
-            ? 'rgba(0, 0, 0, 0.08)' 
+          bgcolor: theme.palette.mode === 'light'
+            ? 'rgba(0, 0, 0, 0.08)'
             : 'rgba(255, 255, 255, 0.12)',
           color: theme.palette.text.primary,
           '&:hover': {
-            bgcolor: theme.palette.mode === 'light' 
-              ? 'rgba(0, 0, 0, 0.12)' 
+            bgcolor: theme.palette.mode === 'light'
+              ? 'rgba(0, 0, 0, 0.12)'
               : 'rgba(255, 255, 255, 0.18)'
           }
         }}
@@ -7237,11 +7232,11 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                       },
                     },
                   }}
-                  onClick={() => {
-                    setCurrentViewImageUrl(imageUrl)
-                    // Show comparison bar when image is selected from library
-                    // The useEffect will handle loading the image and showing the comparison
-                  }}
+                    onClick={() => {
+                      setCurrentViewImageUrl(imageUrl)
+                      // Show comparison bar when image is selected from library
+                      // The useEffect will handle loading the image and showing the comparison
+                    }}
                 >
                   <Box
                     component="img"

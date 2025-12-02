@@ -643,6 +643,41 @@ export async function uploadCanvasImage(
   }
 }
 
+
+/**
+ * Upload a Signature Style image to Firebase Storage.
+ * Used for user-provided style reference images that guide AI generation.
+ * @param userId - User ID
+ * @param projectId - Project ID
+ * @param signatureStyleId - Unique signature style ID
+ * @param dataUrl - Base64 data URL of the image
+ * @returns Download URL of the uploaded image
+ */
+export async function uploadSignatureStyleImage(
+  userId: string,
+  projectId: string,
+  signatureStyleId: string,
+  dataUrl: string
+): Promise<string> {
+  if (!userId || !projectId || !signatureStyleId || !dataUrl) {
+    throw new Error('All parameters are required for signature style image upload')
+  }
+
+  try {
+    const imagePath = `users/${userId}/projects/${projectId}/signatureStyles/${signatureStyleId}`
+    const imageRef = ref(storage, imagePath)
+
+    const snapshot = await uploadString(imageRef, dataUrl, 'data_url')
+    console.log('Signature style image uploaded to Storage:', imagePath)
+
+    const downloadURL = await getDownloadURL(snapshot.ref)
+    return downloadURL
+  } catch (error: any) {
+    console.error('Error uploading signature style image:', error)
+    throw error
+  }
+}
+
 /**
  * Delete a canvas image from Firebase Storage
  * @param userId - User ID

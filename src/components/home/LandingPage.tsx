@@ -403,7 +403,9 @@ export default function LandingPage() {
                 sx={{
                   position: 'relative',
                   width: '100%',
-                  height: { xs: '300px', md: '400px' },
+                  maxWidth: { xs: '100%', md: 640 },
+                  mx: { xs: 'auto', md: 0 },
+                  aspectRatio: { xs: '16/9', md: '16/9' },
                   borderRadius: '16px',
                   overflow: 'hidden',
                   boxShadow: '0 20px 40px rgba(0,0,0,0.3)',
@@ -418,7 +420,7 @@ export default function LandingPage() {
                   muted
                   playsInline
                   style={{
-                    objectFit: 'cover',
+                    objectFit: 'contain',
                     width: '100%',
                     height: '100%'
                   }}
@@ -559,7 +561,9 @@ export default function LandingPage() {
                 sx={{
                   position: 'relative',
                   width: '100%',
-                  height: { xs: '300px', md: '400px' },
+                  maxWidth: { xs: '100%', md: 640 },
+                  mx: { xs: 'auto', md: 0 },
+                  aspectRatio: { xs: '16/9', md: '16/9' },
                   borderRadius: '16px',
                   overflow: 'hidden',
                   boxShadow: '0 20px 40px rgba(0,0,0,0.3)',
@@ -574,7 +578,7 @@ export default function LandingPage() {
                   muted
                   playsInline
                   style={{
-                    objectFit: 'cover',
+                    objectFit: 'contain',
                     width: '100%',
                     height: '100%'
                   }}
@@ -715,7 +719,9 @@ export default function LandingPage() {
                 sx={{
                   position: 'relative',
                   width: '100%',
-                  height: { xs: '300px', md: '400px' },
+                  maxWidth: { xs: '100%', md: 640 },
+                  mx: { xs: 'auto', md: 0 },
+                  aspectRatio: { xs: '16/9', md: '16/9' },
                   borderRadius: '16px',
                   overflow: 'hidden',
                   boxShadow: '0 20px 40px rgba(0,0,0,0.3)',
@@ -730,7 +736,7 @@ export default function LandingPage() {
                   muted
                   playsInline
                   style={{
-                    objectFit: 'cover',
+                    objectFit: 'contain',
                     width: '100%',
                     height: '100%'
                   }}

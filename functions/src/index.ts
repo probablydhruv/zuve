@@ -37,6 +37,7 @@ type CallablePayload = {
   primaryStone?: string
   secondaryStone?: string
   userContext?: string
+  signatureStyleUrls?: string[]
 }
 
 export const generateDesignImage = functions
@@ -58,7 +59,8 @@ export const generateDesignImage = functions
     metalColor = 'None',
     primaryStone = 'None',
     secondaryStone = 'None',
-    userContext = ''
+    userContext = '',
+    signatureStyleUrls = [],
   } = data || {}
 
   if (!projectId || !actionType) {
@@ -202,6 +204,32 @@ Antique
             })
           } catch (e) {
             console.warn('Failed to fetch style reference image:', style, url, e)
+          }
+        }
+      }
+
+      // 2b) User-provided Signature Style reference images (from canvas Signature Styles)
+      if (gFetch && Array.isArray(signatureStyleUrls) && signatureStyleUrls.length > 0) {
+        for (const url of signatureStyleUrls) {
+          try {
+            const resp = await gFetch(url)
+            if (!resp || !resp.ok) {
+              console.warn('Failed to fetch signature style image (non-OK response):', url)
+              continue
+            }
+            const arrayBuffer = await resp.arrayBuffer()
+            const refB64 = Buffer.from(arrayBuffer).toString('base64')
+            const refMime =
+              (resp.headers && resp.headers.get && resp.headers.get('content-type')) || 'image/jpeg'
+
+            parts.push({
+              inlineData: {
+                data: refB64,
+                mimeType: refMime,
+              },
+            })
+          } catch (e) {
+            console.warn('Failed to fetch signature style image:', url, e)
           }
         }
       }
