@@ -17,7 +17,9 @@ import { InteractiveHoverButton } from '@/components/ui/interactive-hover-button
 import { functions as firebaseFunctions } from '@/lib/firebaseClient'
 import { getCanvasData, saveCanvasData, getUserMotifs, saveUserMotif, deleteUserMotif, Motif, uploadCanvasImage, deleteCanvasImage, uploadSignatureStyleImage } from '@/lib/firestore'
 
-const STONES = [
+type StoneOption = { key: string; label: string; icon: string; hasSubmenu?: boolean }
+
+const STONES: StoneOption[] = [
   { key: 'none', label: 'None', icon: '⚪' },
   { key: 'diamond', label: 'Diamond', icon: '💎' },
   { key: 'ruby', label: 'Ruby', icon: '🔴' },
@@ -25,7 +27,7 @@ const STONES = [
   { key: 'emerald', label: 'Emerald', icon: '🟢' },
   { key: 'amethyst', label: 'Amethyst', icon: '🟣' },
   { key: 'pearl', label: 'Pearl', icon: '⚪' },
-] as const
+]
 
 const SAPPHIRE_VARIANTS = [
   { key: 'sapphire_blue', label: 'Blue Sapphire', icon: '🔵' },
