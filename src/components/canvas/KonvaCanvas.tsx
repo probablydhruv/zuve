@@ -430,6 +430,21 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
     }
   }, [])
 
+  // Helper to fit a generated image inside the canvas without stretching (letterbox style)
+  const getFittedImageRect = (img: HTMLImageElement, containerWidth: number, containerHeight: number) => {
+    if (!img || !containerWidth || !containerHeight) {
+      return { x: 0, y: 0, width: containerWidth, height: containerHeight }
+    }
+    const iw = img.width || 1
+    const ih = img.height || 1
+    const scale = Math.min(containerWidth / iw, containerHeight / ih) || 1
+    const width = iw * scale
+    const height = ih * scale
+    const x = (containerWidth - width) / 2
+    const y = (containerHeight - height) / 2
+    return { x, y, width, height }
+  }
+
   const buildPrompt = useCallback((action: 'generate' | 'harmonize') => {
     const primaryStoneInfo = findStoneDetails(primaryStone)
     const secondaryStoneInfo = secondaryStone ? findStoneDetails(secondaryStone) : null
@@ -3713,14 +3728,19 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                     ctx.rect(0, 0, Math.max(0, Math.min(compareX, canvasSize.width)), canvasSize.height)
                   }}
                 >
-                  <KonvaImage
-                    image={generatedImageElement}
-                    x={0}
-                    y={0}
-                    width={canvasSize.width}
-                    height={canvasSize.height}
-                    listening={false}
-                  />
+                  {(() => {
+                    const { x, y, width, height } = getFittedImageRect(generatedImageElement, canvasSize.width, canvasSize.height)
+                    return (
+                      <KonvaImage
+                        image={generatedImageElement}
+                        x={x}
+                        y={y}
+                        width={width}
+                        height={height}
+                        listening={false}
+                      />
+                    )
+                  })()}
                 </Group>
               )}
 
