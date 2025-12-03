@@ -522,67 +522,37 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
       hasAutoSwitchedRef.current = false
     }
 
+    // TEST OVERRIDE: skip AI call and show demodemo.png as the rendered image
     try {
-      const callable = httpsCallable<GenerateDesignImagePayload, GenerateDesignImageResponse>(firebaseFunctions, 'generateDesignImage')
-      const promptText = buildPrompt(action)
-      console.log('Triggering AI action', { action, promptText })
-      const response = await callable({
-        actionType: action,
-        projectId,
-        promptText,
-        style: selectedJewelleryStyle || 'Generic',
-        styleOptions: selectedJewelleryStyle ? [selectedJewelleryStyle] : [],
-        harmonizeOptions: selectedHarmonizeOptions,
-        sketchDataUrl: snapshot ?? undefined,
-        canvasInfluence,
-        metalColor: metal || undefined,
-        primaryStone: primaryStone || undefined,
-        secondaryStone: secondaryStone || undefined,
-        userContext: (contextText || '').trim() || undefined,
-        signatureStyleUrls: signatureStyles.filter(s => !!s.storageUrl).map(s => s.storageUrl as string),
-      })
+      const testUrl = '/demodemo.png'
 
-      const data = response.data
-      if (!data?.downloadURL) {
-        throw new Error('AI service returned an empty response.')
-      }
-
-      // Store image based on action type
       if (action === 'generate') {
-        setRenderedImageUrl(data.downloadURL)
+        setRenderedImageUrl(testUrl)
       } else {
-        setHarmonizedImageUrl(data.downloadURL)
+        setHarmonizedImageUrl(testUrl)
       }
 
-      // Add to generated images library (check for duplicates)
       setGeneratedImages(prev => {
-        if (!data.downloadURL) {
-          return prev // Safety check
-        }
-        if (prev.includes(data.downloadURL)) {
-          return prev // Don't add duplicates
-        }
-        const updated = [...prev, data.downloadURL]
-        // Expand library panel if this is the first image
+        if (prev.includes(testUrl)) return prev
+        const updated = [...prev, testUrl]
         if (prev.length === 0) {
           setImageLibraryExpanded(true)
         }
         return updated
       })
 
-      // Set current view: prefer harmonized if both exist, otherwise use the new one
-      const newRenderedUrl = action === 'generate' ? data.downloadURL : renderedImageUrl
-      const newHarmonizedUrl = action === 'harmonize' ? data.downloadURL : harmonizedImageUrl
-      const nextViewUrl = newHarmonizedUrl || newRenderedUrl || data.downloadURL
+      const newRenderedUrl = action === 'generate' ? testUrl : renderedImageUrl
+      const newHarmonizedUrl = action === 'harmonize' ? testUrl : harmonizedImageUrl
+      const nextViewUrl = newHarmonizedUrl || newRenderedUrl || testUrl
       setCurrentViewImageUrl(nextViewUrl)
 
       setShowCompareOverlay(true)
       setCompareSliderValue(50)
       setSnackbar({
-        message: action === 'generate' ? 'AI render ready.' : 'Harmonized render ready.',
+        message: action === 'generate' ? 'Test render (demodemo.png) ready.' : 'Test harmonized render (demodemo.png) ready.',
         severity: 'success'
       })
-      console.log('AI generation complete', { action, storagePath: data.storagePath, resultId: data.resultId })
+      console.log('TEST: Skipped AI, using demodemo.png for', action)
     } catch (error) {
       console.error(`Failed to ${action} design`, error)
       let message = 'Failed to reach the AI service.'
