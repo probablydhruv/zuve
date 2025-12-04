@@ -271,10 +271,34 @@ Antique
     throw new functions.https.HttpsError('internal', 'Generated image was empty')
   }
 
-  // TEMP: Skip Storage. Return data URL directly for testing
-  const base64 = (buffer as Buffer).toString('base64')
-  const dataUrl = `data:${mimeType};base64,${base64}`
-  return { downloadURL: dataUrl }
+  // Upload generated image to Firebase Storage and return a short download URL
+  try {
+    const bucket = admin.storage().bucket()
+    const timestamp = Date.now()
+    const random = Math.random().toString(36).slice(2)
+    const extension = mimeType === 'image/jpeg' ? 'jpg' : mimeType.split('/')[1] || 'png'
+    const filePath = `generated/${projectId}/${timestamp}-${random}.${extension}`
+    const file = bucket.file(filePath)
+
+    await file.save(buffer as Buffer, {
+      contentType: mimeType,
+      metadata: {
+        cacheControl: 'public,max-age=31536000',
+      },
+    })
+
+    const [url] = await file.getSignedUrl({
+      action: 'read',
+      expires: '2500-01-01',
+    })
+
+    return { downloadURL: url, storagePath: filePath }
+  } catch (error) {
+    console.error('Failed to upload generated image to Storage, falling back to data URL:', error)
+    const base64 = (buffer as Buffer).toString('base64')
+    const dataUrl = `data:${mimeType};base64,${base64}`
+    return { downloadURL: dataUrl }
+  }
 })
 
 // Aura Assist: Return an expert review based on sketch (full text, UI handles scrolling)

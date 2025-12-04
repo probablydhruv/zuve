@@ -577,12 +577,14 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
         if (prev.includes(data.downloadURL)) {
           return prev // Don't add duplicates
         }
+        const MAX_GENERATED_IMAGES = 50
         const updated = [...prev, data.downloadURL]
+        const trimmed = updated.slice(-MAX_GENERATED_IMAGES)
         // Expand library panel if this is the first image
         if (prev.length === 0) {
           setImageLibraryExpanded(true)
         }
-        return updated
+        return trimmed
       })
 
       // Set current view: prefer harmonized if both exist, otherwise use the new one
@@ -808,6 +810,16 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
       return
     }
 
+    // Enforce a 10MB max size to match Storage rules
+    const MAX_SIZE_BYTES = 10 * 1024 * 1024
+    if (file.size > MAX_SIZE_BYTES) {
+      setSnackbar({
+        message: 'Signature style images must be under 10MB.',
+        severity: 'error'
+      })
+      return
+    }
+
     const reader = new FileReader()
     reader.onload = (e) => {
       const imageUrl = e.target?.result as string
@@ -832,8 +844,15 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
           })
           .catch((error) => {
             console.error('Error uploading signature style to Storage:', error)
+            let message = 'Signature style image could not be uploaded.'
+            const code = (error && (error.code || error.message || '')).toString()
+            if (code.includes('permission') || code.includes('unauthorized')) {
+              message = 'Cannot upload signature style: check Storage permissions.'
+            } else if (code.includes('retry-limit-exceeded')) {
+              message = 'Signature style upload took too long. Please check your connection and try again.'
+            }
             setSnackbar({
-              message: 'Signature style image could not be uploaded. It will not be used as an AI reference until upload succeeds.',
+              message,
               severity: 'error'
             })
           })
@@ -1855,7 +1874,21 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
             return cleanImage
           })
 
-        // Log if some images couldn't be saved yet (still uploading to Storage)
+        // Persist canvas data to Firestore with a capped list of generated image URLs
+        const MAX_GENERATED_IMAGES = 50
+        const generatedImagesToSave = generatedImages.slice(-MAX_GENERATED_IMAGES)
+
+        await saveCanvasData(user.uid, projectId, {
+          lines,
+          images: imagesToSave,
+          layers,
+          zoom,
+          canvasSize,
+          generatedImages: generatedImagesToSave,
+          insertedMotifs,
+          motifLayerMap,
+          imageLayerMap,
+        })
 
         console.log('Canvas auto-saved successfully')
       } catch (error: any) {
@@ -2090,6 +2123,25 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
     }
   }
 
+  // Simple stroke smoothing: moving average over the last few points
+  const SMOOTHING_WINDOW = 4
+  const smoothLinePoints = (points: number[]): number[] => {
+    if (points.length <= 4) return points
+    const smoothed: number[] = []
+    for (let i = 0; i < points.length; i += 2) {
+      const windowPointsX: number[] = []
+      const windowPointsY: number[] = []
+      for (let j = Math.max(0, i - (SMOOTHING_WINDOW - 1) * 2); j <= i; j += 2) {
+        windowPointsX.push(points[j])
+        windowPointsY.push(points[j + 1])
+      }
+      const avgX = windowPointsX.reduce((a, b) => a + b, 0) / windowPointsX.length
+      const avgY = windowPointsY.reduce((a, b) => a + b, 0) / windowPointsY.length
+      smoothed.push(avgX, avgY)
+    }
+    return smoothed
+  }
+
   const handlePointerDown = (e: any) => {
     // Prevent default to avoid scrolling on touch devices
     e.evt.preventDefault()
@@ -2276,8 +2328,10 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
       const next = prev.slice()
       const last = next[next.length - 1]
       
-      // Add point with pressure data
+      // Add raw point
       last.points = last.points.concat([pointerData.x, pointerData.y])
+      // Apply smoothing to points for a more Procreate-like feel
+      last.points = smoothLinePoints(last.points)
       
       // Update stroke width and opacity based on pressure
       last.strokeWidth = dynamicSize
