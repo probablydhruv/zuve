@@ -1,7 +1,26 @@
 'use client'
 
-import { useRef, useState, useEffect, useCallback } from 'react'
-import { Stage, Layer, Line, Image as KonvaImage, Transformer, Rect, Group, Text, Circle } from 'react-konva'
+import { useRef, useState, useEffect, useCallback, useMemo } from 'react'
+import { Stage, Layer, Line, Shape, Image as KonvaImage, Transformer, Rect, Group, Text, Circle } from 'react-konva'
+
+// Drawing engine imports for Procreate-style sketching
+import {
+  DrawingEngine,
+  extractPointerData,
+  getCoalescedEvents,
+  getPredictedEvents,
+  isPalmTouch,
+  isApplePencil,
+  type Stroke,
+  type StrokePoint
+} from './DrawingEngine'
+import {
+  generateStrokeGeometry,
+  generateSimpleLinePoints,
+  DEFAULT_RENDER_OPTIONS,
+  type RenderOptions
+} from './VariableWidthRenderer'
+import { GestureHandler, type GestureType } from './GestureHandler'
 import { Box, Slider, ToggleButton, ToggleButtonGroup, Button, Divider, Typography, IconButton, Menu, MenuItem, Tooltip, List, ListItem, ListItemText, ListItemSecondaryAction, ButtonGroup, Card, CardActionArea, CardContent as MUICardContent, Drawer, Fab, TextField, Checkbox, CircularProgress, Snackbar, Alert, Dialog, DialogTitle, DialogContent, DialogContentText, DialogActions, Collapse, Slide } from '@mui/material'
 import { Add, Delete, Visibility, VisibilityOff, Undo, Redo, ZoomIn, ZoomOut, PanToolAlt, Gesture, Layers as LayersIcon, Settings, AutoFixHigh, Close, Campaign, ContentCopy, Crop, ContentCut, DesignServices, SettingsSuggest, SwapHoriz, Download, DeleteSweep, ExpandMore, ExpandLess } from '@mui/icons-material'
 import { LightMode, DarkMode } from '@mui/icons-material'
@@ -114,10 +133,10 @@ type GenerateDesignImageResponse = {
 const findStoneDetails = (key: string) => {
   const stone = STONES.find(s => s.key === key)
   if (stone) return stone
-  
+
   const sapphireVariant = SAPPHIRE_VARIANTS.find(s => s.key === key)
   if (sapphireVariant) return sapphireVariant
-  
+
   return { key, label: 'None', icon: '⚪' }
 }
 
@@ -131,12 +150,37 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
   const [brushOpacity, setBrushOpacity] = useState(1)
   const [lines, setLines] = useState<any[]>([])
   const isDrawing = useRef(false)
+  const linesRef = useRef<any[]>([])  // Always reflects current lines (for history saving)
   const [zoom, setZoom] = useState(1)
   const [isLoadingCanvas, setIsLoadingCanvas] = useState(true)
   const autoSaveTimeoutRef = useRef<NodeJS.Timeout | null>(null)
   const toolbarRef = useRef<HTMLDivElement>(null)
   const minZoom = 1.0
   const maxZoom = 3
+
+  // New drawing engine for Procreate-style strokes
+  // Use lazy initialization to avoid SSR issues
+  const drawingEngineRef = useRef<DrawingEngine | null>(null)
+  const gestureHandlerRef = useRef<GestureHandler | null>(null)
+  const canvasContainerRef = useRef<HTMLDivElement>(null)
+  const [strokes, setStrokes] = useState<Stroke[]>([])  // New stroke format with pressure
+  const [activeStroke, setActiveStroke] = useState<Stroke | null>(null)  // Currently drawing stroke
+  const [renderOptions] = useState<RenderOptions>(DEFAULT_RENDER_OPTIONS)
+
+  // Pull-String Stabilization (Procreate-style StreamLine)
+  // The brush follows at a fixed distance, absorbing small jitters
+  const [streamLineAmount, setStreamLineAmount] = useState(0.5)  // 0 = off, 1 = max
+  const brushPositionRef = useRef<{ x: number; y: number } | null>(null)
+  const STRING_LENGTH_MIN = 2   // Minimum string length in pixels
+  const STRING_LENGTH_MAX = 30  // Maximum string length in pixels
+
+  // Lazy initialize drawing engine and gesture handler
+  if (!drawingEngineRef.current) {
+    drawingEngineRef.current = new DrawingEngine()
+  }
+  if (!gestureHandlerRef.current) {
+    gestureHandlerRef.current = new GestureHandler()
+  }
 
   // Theme management
   const { mode, toggleThemeMode } = useThemeMode()
@@ -203,7 +247,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
   const isGenerateLoading = activeAIAction === 'generate'
   const isHarmonizeLoading = activeAIAction === 'harmonize'
   const isAIProcessing = activeAIAction !== null
-  
+
   // Content Builder state
   const [selectedStyle, setSelectedStyle] = useState('Festive')
   const [selectedRegion, setSelectedRegion] = useState('Global')
@@ -221,6 +265,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
   })
 
   // History management for undo/redo
+  // history[0] = initial empty state, historyIndex points to current state
   const [history, setHistory] = useState<any[][]>([[]])
   const [historyIndex, setHistoryIndex] = useState(0)
   const maxHistorySize = 50
@@ -256,7 +301,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
       return () => clearTimeout(timeoutId)
     }
   }, [canvasSize.width, toolbarCentered])
-  
+
   // Associate content with layers
   const [lineLayerMap, setLineLayerMap] = useState<{ [lineIndex: number]: string }>({})
   const [imageLayerMap, setImageLayerMap] = useState<{ [imageId: string]: string }>({})
@@ -272,7 +317,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
     if (uploadedImages.length > 0) {
       const updatedImageLayerMap = { ...imageLayerMap }
       let needsUpdate = false
-      
+
       uploadedImages.forEach(image => {
         if (!updatedImageLayerMap[image.id]) {
           updatedImageLayerMap[image.id] = activeLayerId
@@ -280,7 +325,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
           console.log('Assigning unassigned image to active layer:', image.id, activeLayerId)
         }
       })
-      
+
       if (needsUpdate) {
         setImageLayerMap(updatedImageLayerMap)
       }
@@ -292,7 +337,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
     if (lines.length > 0) {
       const updatedLineLayerMap = { ...lineLayerMap }
       let needsUpdate = false
-      
+
       lines.forEach((_, index) => {
         if (!updatedLineLayerMap[index]) {
           updatedLineLayerMap[index] = activeLayerId
@@ -300,7 +345,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
           console.log('Assigning unassigned line to active layer:', index, activeLayerId)
         }
       })
-      
+
       if (needsUpdate) {
         setLineLayerMap(updatedLineLayerMap)
       }
@@ -353,28 +398,28 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
     return { events: [], cooldownUntil: undefined, tier: 'free' }
   })
   const [usageStatus, setUsageStatus] = useState(() => getCurrentUsageStatus(usageData))
-  
+
   // Function to change user tier (can be called when user upgrades/downgrades)
   const setUserTier = useCallback((newTier: TierType) => {
     // When tier changes (e.g. upgrading to Pro), clear any existing cooldown
     // and keep the existing usage events so the new tier still respects history.
-    const newUsageData: UsageData = { 
-      ...usageData, 
+    const newUsageData: UsageData = {
+      ...usageData,
       tier: newTier,
-      cooldownUntil: undefined 
+      cooldownUntil: undefined
     }
 
     setUsageData(newUsageData)
     setUsageStatus(getCurrentUsageStatus(newUsageData))
-    
+
     // Save to localStorage
     if (typeof window !== 'undefined') {
       localStorage.setItem('zuve-usage-data', JSON.stringify(newUsageData))
     }
-    
+
     console.log('User tier updated to:', newTier, 'and cooldown cleared')
   }, [usageData])
-  
+
   // Sync tier from Firebase auth when it changes
   useEffect(() => {
     if (tier && tier !== usageData.tier) {
@@ -396,15 +441,15 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
     console.log('trackUsage - before handleRequest - cooldownUntil:', newUsageData.cooldownUntil)
     const result = handleRequest(newUsageData, now, 1)
     console.log('trackUsage - after handleRequest - cooldownUntil:', newUsageData.cooldownUntil, 'color:', result.color)
-    
+
     setUsageData(newUsageData)
     setUsageStatus(result)
-    
+
     // Save to localStorage
     if (typeof window !== 'undefined') {
       localStorage.setItem('zuve-usage-data', JSON.stringify(newUsageData))
     }
-    
+
     return result
   }, [usageData])
 
@@ -413,7 +458,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
     const newUsageData = { events: [], cooldownUntil: undefined, tier: usageData.tier || 'free' }
     setUsageData(newUsageData)
     setUsageStatus(getCurrentUsageStatus(newUsageData))
-    
+
     // Update localStorage (don't remove, just reset events)
     if (typeof window !== 'undefined') {
       localStorage.setItem('zuve-usage-data', JSON.stringify(newUsageData))
@@ -480,7 +525,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
     }
 
     // Harmonize prompt with dynamic options
-    const harmonizeOptionsText = selectedHarmonizeOptions.length 
+    const harmonizeOptionsText = selectedHarmonizeOptions.length
       ? selectedHarmonizeOptions.join(', ')
       : ''
     const intro = harmonizeOptionsText
@@ -655,7 +700,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
 
   const handleDownloadImage = useCallback(() => {
     if (!currentViewImageUrl) return
-    
+
     // Create a temporary link element
     const link = document.createElement('a')
     link.href = currentViewImageUrl
@@ -663,7 +708,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
     document.body.appendChild(link)
     link.click()
     document.body.removeChild(link)
-    
+
     setSnackbar({
       message: 'Image downloaded successfully!',
       severity: 'success'
@@ -674,7 +719,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
     if (e) {
       e.stopPropagation() // Prevent thumbnail click from changing canvas view
     }
-    
+
     // Create a temporary link element
     const link = document.createElement('a')
     link.href = url
@@ -682,7 +727,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
     document.body.appendChild(link)
     link.click()
     document.body.removeChild(link)
-    
+
     setSnackbar({
       message: 'Image downloaded successfully!',
       severity: 'success'
@@ -716,17 +761,17 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
       name: `Motif ${motifs.length + 1}`,
       data: JSON.stringify(motifDrawingLines)
     }
-    
+
     try {
       // Save to Firestore
       await saveUserMotif(user.uid, newMotif)
-      
+
       // Update local state
       setMotifs(prev => [...prev, newMotif])
       setIsCreatingMotif(false)
       setMotifDrawingLines([])
       console.log('Saved motif:', newMotif.name)
-      
+
       setSnackbar({
         message: 'Motif saved successfully!',
         severity: 'success'
@@ -760,10 +805,10 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
     try {
       // Delete from Firestore
       await deleteUserMotif(user.uid, motifId)
-      
+
       // Update local state
       setMotifs(prev => prev.filter(m => m.id !== motifId))
-      
+
       // Also remove from canvas if it's inserted
       setInsertedMotifs(prev => prev.filter(m => m.id !== motifId))
       setMotifLayerMap(prevMap => {
@@ -771,12 +816,12 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
         delete newMap[motifId]
         return newMap
       })
-      
+
       // Clear selection if this motif was selected
       if (selectedMotifId === motifId) {
         setSelectedMotifId(null)
       }
-      
+
       console.log('Deleted motif:', motifId)
       setSnackbar({
         message: 'Motif deleted successfully!',
@@ -795,7 +840,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
   const handleSignatureStyleUpload = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
     console.log('Signature style file selected:', file?.name, file?.type, file?.size)
-    
+
     if (!file) return
 
     // Check maximum limit
@@ -829,7 +874,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
         name: file.name.replace(/\.[^/.]+$/, ""), // Remove file extension
         url: imageUrl,
       }
-      
+
       setSignatureStyles(prev => [...prev, newSignatureStyle])
       console.log('Added signature style:', newSignatureStyle.name)
 
@@ -860,7 +905,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
         console.warn('Cannot upload signature style: missing user or project context')
       }
     }
-    
+
     reader.readAsDataURL(file)
   }, [signatureStyles.length, user?.uid, projectId])
 
@@ -874,7 +919,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
   const renderMotifPreview = useCallback((motif: { id: string, name: string, data: string }) => {
     try {
       const motifPoints = JSON.parse(motif.data) as number[]
-      
+
       if (motifPoints.length < 4) {
         return <Typography variant="caption" sx={{ fontWeight: 'bold', textAlign: 'center' }}>
           {motif.name}
@@ -919,10 +964,10 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
             width={BOX}
             height={BOX}
             viewBox={`0 0 ${BOX} ${BOX}`}
-            style={{ 
-              position: 'absolute', 
-              top: '50%', 
-              left: '50%', 
+            style={{
+              position: 'absolute',
+              top: '50%',
+              left: '50%',
               transform: 'translate(-50%, -50%)',
               color: 'inherit'
             }}
@@ -936,14 +981,14 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
               style={{ color: 'inherit' }}
             />
           </svg>
-          <Typography 
-            variant="caption" 
-            sx={(theme) => ({ 
-              position: 'absolute', 
-              bottom: 2, 
-              left: 0, 
-              right: 0, 
-              textAlign: 'center', 
+          <Typography
+            variant="caption"
+            sx={(theme) => ({
+              position: 'absolute',
+              bottom: 2,
+              left: 0,
+              right: 0,
+              textAlign: 'center',
               fontSize: '0.6rem',
               fontWeight: 'bold',
               backgroundColor: theme.palette.mode === 'dark' ? 'rgba(0,0,0,0.5)' : 'rgba(255,255,255,0.8)',
@@ -1003,7 +1048,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
   const handleImageUpload = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
     console.log('File selected:', file?.name, file?.type, file?.size)
-    
+
     if (!file) return
 
     // Validate file type
@@ -1020,12 +1065,12 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
     }
 
     const reader = new FileReader()
-    
+
     reader.onerror = (error) => {
       console.error('FileReader error:', error)
       alert('Failed to read the image file. Please try again.')
     }
-    
+
     reader.onload = (e) => {
       const imageUrl = e.target?.result as string
       if (!imageUrl) {
@@ -1033,9 +1078,9 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
         alert('Failed to read the image file. Please try again.')
         return
       }
-      
+
       const img = new Image()
-      
+
       img.onload = () => {
         // Safety check: ensure image has valid dimensions
         if (!img.width || !img.height || img.width <= 0 || img.height <= 0) {
@@ -1048,25 +1093,25 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
         // Calculate dimensions maintaining aspect ratio
         const maxDimension = 300
         const maxSize = Math.max(img.width, img.height)
-        
+
         // Safety check: prevent division by zero
         if (maxSize <= 0) {
           console.error('Invalid max size:', maxSize)
           alert('Failed to process image: Invalid dimensions')
           return
         }
-        
+
         const scale = Math.min(1, maxDimension / maxSize)
         const width = Math.round(img.width * scale)
         const height = Math.round(img.height * scale)
-        
+
         // Additional safety: ensure minimum dimensions
         if (width <= 0 || height <= 0) {
           console.error('Calculated invalid dimensions:', width, height)
           alert('Failed to process image: Invalid calculated dimensions')
           return
         }
-        
+
         const newImage: any = {
           id: imageId,
           x: 100,
@@ -1080,7 +1125,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
           originalHeight: img.height,
           storageUrl: null // Will be set after uploading to Storage
         }
-        
+
         console.log('Image loaded successfully:', {
           imageId,
           width: img.width,
@@ -1091,7 +1136,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
           calculatedHeight: height,
           scale
         })
-        
+
         // Add image to state immediately for display
         setUploadedImages(prev => [...prev, newImage])
         setImageElements(prev => ({ ...prev, [imageId]: img }))
@@ -1101,7 +1146,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
           return newMap
         })
         setSelectedImageId(imageId)
-        
+
         // Automatically switch to hand tool after image upload
         setTool('hand')
 
@@ -1137,15 +1182,15 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
             })
         }
       }
-      
+
       img.onerror = (error) => {
         console.error('Failed to load image:', error)
         alert('Failed to load the selected image. Please try a different file.')
       }
-      
+
       img.src = imageUrl
     }
-    
+
     reader.readAsDataURL(file)
   }, [activeLayerId, user?.uid, projectId, compressImage])
 
@@ -1274,32 +1319,32 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
         const imageY = selectedImage.y
         const imageWidth = selectedImage.width
         const imageHeight = selectedImage.height
-        
+
         // Convert canvas coordinates to image coordinates
         const cropX = Math.max(0, (cropArea.x - imageX) / imageWidth)
         const cropY = Math.max(0, (cropArea.y - imageY) / imageHeight)
         const cropWidth = Math.min(1, cropArea.width / imageWidth)
         const cropHeight = Math.min(1, cropArea.height / imageHeight)
-        
+
         // Update image with crop data
-        setUploadedImages(prev => 
-          prev.map(img => 
-            img.id === selectedImageId 
-              ? { 
-                  ...img, 
-                  cropX, 
-                  cropY, 
-                  cropWidth, 
-                  cropHeight,
-                  x: cropArea.x,
-                  y: cropArea.y,
-                  width: cropArea.width,
-                  height: cropArea.height
-                }
+        setUploadedImages(prev =>
+          prev.map(img =>
+            img.id === selectedImageId
+              ? {
+                ...img,
+                cropX,
+                cropY,
+                cropWidth,
+                cropHeight,
+                x: cropArea.x,
+                y: cropArea.y,
+                width: cropArea.width,
+                height: cropArea.height
+              }
               : img
           )
         )
-        
+
         console.log('Crop applied:', { cropX, cropY, cropWidth, cropHeight })
       }
     }
@@ -1338,9 +1383,9 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
       const yi = polygon[i + 1]
       const xj = polygon[j]
       const yj = polygon[j + 1]
-      
-      if (((yi > point.y) !== (yj > point.y)) && 
-          (point.x < (xj - xi) * (point.y - yi) / (yj - yi) + xi)) {
+
+      if (((yi > point.y) !== (yj > point.y)) &&
+        (point.x < (xj - xi) * (point.y - yi) / (yj - yi) + xi)) {
         inside = !inside
       }
     }
@@ -1350,15 +1395,15 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
   // Check if a line intersects with the selection polygon and get selected points
   const getSelectedLinePoints = (points: number[], selectionPath: number[]) => {
     if (selectionPath.length < 6) return null // Need at least 3 points for a polygon
-    
+
     const selectedPoints: number[] = []
     let hasSelectedPoints = false
     let lastPointInSelection = false
-    
+
     for (let i = 0; i < points.length; i += 2) {
       const point = { x: points[i], y: points[i + 1] }
       const currentPointInSelection = isPointInPolygon(point, selectionPath)
-      
+
       // Add point if it's in selection
       if (currentPointInSelection) {
         selectedPoints.push(points[i], points[i + 1])
@@ -1380,10 +1425,10 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
           selectedPoints.push(intersection.x, intersection.y)
         }
       }
-      
+
       lastPointInSelection = currentPointInSelection
     }
-    
+
     return hasSelectedPoints ? selectedPoints : null
   }
 
@@ -1392,7 +1437,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
     for (let i = 0; i < polygon.length; i += 2) {
       const p3 = { x: polygon[i], y: polygon[i + 1] }
       const p4 = { x: polygon[(i + 2) % polygon.length], y: polygon[(i + 3) % polygon.length] }
-      
+
       const intersection = getLineIntersection(p1, p2, p3, p4)
       if (intersection) {
         return intersection
@@ -1405,10 +1450,10 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
   const getLineIntersection = (p1: { x: number; y: number }, p2: { x: number; y: number }, p3: { x: number; y: number }, p4: { x: number; y: number }) => {
     const denom = (p1.x - p2.x) * (p3.y - p4.y) - (p1.y - p2.y) * (p3.x - p4.x)
     if (Math.abs(denom) < 1e-10) return null // Lines are parallel
-    
+
     const t = ((p1.x - p3.x) * (p3.y - p4.y) - (p1.y - p3.y) * (p3.x - p4.x)) / denom
     const u = -((p1.x - p2.x) * (p1.y - p3.y) - (p1.y - p2.y) * (p1.x - p3.x)) / denom
-    
+
     if (t >= 0 && t <= 1 && u >= 0 && u <= 1) {
       return {
         x: p1.x + t * (p2.x - p1.x),
@@ -1421,7 +1466,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
   // Check if an image intersects with the selection and get crop area using exact polygon
   const getImageSelectionData = (image: any, selectionPath: number[]) => {
     if (selectionPath.length < 6) return null
-    
+
     // Check if any corner of the image is within the selection polygon
     const corners = [
       { x: image.x, y: image.y },
@@ -1429,13 +1474,13 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
       { x: image.x, y: image.y + image.height },
       { x: image.x + image.width, y: image.y + image.height }
     ]
-    
+
     const cornersInSelection = corners.filter(corner => isPointInPolygon(corner, selectionPath))
-    
+
     if (cornersInSelection.length === 0) {
       return null // No intersection
     }
-    
+
     // If all corners are in selection, select the entire image
     if (cornersInSelection.length === 4) {
       return {
@@ -1450,11 +1495,11 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
         isFullSelection: true
       }
     }
-    
+
     // For partial selection, we'll create a mask-based approach
     // Instead of rectangular cropping, we'll store the selection polygon
     // and use it as a mask when rendering
-    
+
     // Find the bounding box of the selection polygon
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
     for (let i = 0; i < selectionPath.length; i += 2) {
@@ -1463,30 +1508,30 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
       maxX = Math.max(maxX, selectionPath[i])
       maxY = Math.max(maxY, selectionPath[i + 1])
     }
-    
+
     // Check if image intersects with selection bounding box
     const imageRight = image.x + image.width
     const imageBottom = image.y + image.height
-    
+
     if (maxX < image.x || minX > imageRight || maxY < image.y || minY > imageBottom) {
       return null // No intersection
     }
-    
+
     // Calculate intersection area
     const intersectX = Math.max(minX, image.x)
     const intersectY = Math.max(minY, image.y)
     const intersectRight = Math.min(maxX, imageRight)
     const intersectBottom = Math.min(maxY, imageBottom)
-    
+
     const intersectWidth = intersectRight - intersectX
     const intersectHeight = intersectBottom - intersectY
-    
+
     // Calculate crop coordinates relative to the image
     const cropX = Math.max(0, (intersectX - image.x) / image.width)
     const cropY = Math.max(0, (intersectY - image.y) / image.height)
     const cropWidth = Math.min(1, intersectWidth / image.width)
     const cropHeight = Math.min(1, intersectHeight / image.height)
-    
+
     return {
       cropX: Math.max(0, Math.min(1, cropX)),
       cropY: Math.max(0, Math.min(1, cropY)),
@@ -1505,19 +1550,19 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
   // Calculate convex hull of points (Graham scan algorithm)
   const getConvexHull = (points: { x: number; y: number }[]) => {
     if (points.length < 3) return points
-    
+
     // Find the bottom-most point (and leftmost in case of tie)
     let bottom = 0
     for (let i = 1; i < points.length; i++) {
-      if (points[i].y < points[bottom].y || 
-          (points[i].y === points[bottom].y && points[i].x < points[bottom].x)) {
+      if (points[i].y < points[bottom].y ||
+        (points[i].y === points[bottom].y && points[i].x < points[bottom].x)) {
         bottom = i
       }
     }
-    
+
     // Swap with first point
     [points[0], points[bottom]] = [points[bottom], points[0]]
-    
+
     // Sort points by polar angle with respect to bottom point
     const pivot = points[0]
     points.slice(1).sort((a, b) => {
@@ -1525,18 +1570,18 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
       const angleB = Math.atan2(b.y - pivot.y, b.x - pivot.x)
       return angleA - angleB
     })
-    
+
     // Build convex hull
     const hull = [points[0], points[1]]
-    
+
     for (let i = 2; i < points.length; i++) {
-      while (hull.length > 1 && 
-             crossProduct(hull[hull.length - 2], hull[hull.length - 1], points[i]) <= 0) {
+      while (hull.length > 1 &&
+        crossProduct(hull[hull.length - 2], hull[hull.length - 1], points[i]) <= 0) {
         hull.pop()
       }
       hull.push(points[i])
     }
-    
+
     return hull
   }
 
@@ -1555,7 +1600,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
           return {
             ...item,
             id: `line_${Date.now()}_${index}`,
-            points: item.points.map((point: number, i: number) => 
+            points: item.points.map((point: number, i: number) =>
               i % 2 === 0 ? point + 30 : point + 30 // Offset by 30px
             )
           }
@@ -1572,13 +1617,13 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
             cropWidth: item.cropWidth,
             cropHeight: item.cropHeight
           }
-          
+
           // If it's a partial selection, adjust the image size
           if (item.isPartial) {
             newImage.width = item.width
             newImage.height = item.height
           }
-          
+
           return newImage
         }
         return item
@@ -1587,7 +1632,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
       // Add replicated content to canvas
       const newLines = newContent.filter(item => item.type === 'line')
       const newImages = newContent.filter(item => item.type === 'image')
-      
+
       if (newLines.length > 0) {
         setLines(prev => {
           const updatedLines = [...prev, ...newLines]
@@ -1600,7 +1645,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
           return updatedLines
         })
       }
-      
+
       if (newImages.length > 0) {
         setUploadedImages(prev => [...prev, ...newImages])
         // Copy image elements and associate with active layer
@@ -1617,7 +1662,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
       console.log('Selection applied - Content replicated:', newContent.length, 'items')
       console.log('Partial selections:', newContent.filter(item => item.isPartial).length)
     }
-    
+
     // Reset selection mode
     setSelectionMode(false)
     setSelectionPath([])
@@ -1636,10 +1681,10 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
       setGeneratedImageElement(null)
       return
     }
-    
+
     // Clear previous image first to ensure clean switch
     setGeneratedImageElement(null)
-    
+
     const img = new window.Image()
     img.crossOrigin = 'anonymous'
     img.onload = () => {
@@ -1685,7 +1730,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
       try {
         setIsLoadingCanvas(true)
         const savedData = await getCanvasData(user.uid, projectId)
-        
+
         if (savedData) {
           // Restore canvas state
           if (savedData.lines) setLines(savedData.lines)
@@ -1910,28 +1955,83 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
     if (!user?.uid || !projectId) {
       return
     }
-    
+
     // Only trigger auto-save if there's actual content to save
     if (lines.length === 0 && uploadedImages.length === 0 && generatedImages.length === 0 && insertedMotifs.length === 0) {
       return
     }
-    
+
     autoSaveCanvas()
   }, [lines, uploadedImages, layers, zoom, canvasSize, generatedImages, insertedMotifs, autoSaveCanvas, isLoadingCanvas, user?.uid, projectId])
 
-  // Cleanup timeout on unmount
+  // Cleanup timeout on unmount - but FLUSH pending save first!
   useEffect(() => {
     return () => {
       if (autoSaveTimeoutRef.current) {
         clearTimeout(autoSaveTimeoutRef.current)
+
+        // Flush save: If there was a pending save, do it immediately
+        // We can't do async in cleanup, so use sendBeacon or sync approach
+        if (user?.uid && projectId && !isLoadingCanvas) {
+          const hasContent = lines.length > 0 || uploadedImages.length > 0 || generatedImages.length > 0 || insertedMotifs.length > 0
+          if (hasContent) {
+            console.log('Flushing pending save on unmount...')
+            // Use navigator.sendBeacon for reliable save on page unload
+            // For SPA navigation, just trigger the save directly
+            const imagesToSave = uploadedImages
+              .filter(img => img.storageUrl)
+              .map(img => ({
+                id: img.id,
+                x: img.x,
+                y: img.y,
+                width: img.width,
+                height: img.height,
+                scaleX: img.scaleX,
+                scaleY: img.scaleY,
+                rotation: img.rotation,
+                opacity: img.opacity,
+                flipX: img.flipX,
+                flipY: img.flipY,
+                visible: img.visible,
+                storageUrl: img.storageUrl
+              }))
+
+            const generatedImagesToSave = generatedImages.slice(-50)
+
+            // Fire and forget save
+            saveCanvasData(user.uid, projectId, {
+              lines: linesRef.current,  // Use ref to get latest lines
+              images: imagesToSave,
+              layers,
+              zoom,
+              canvasSize,
+              generatedImages: generatedImagesToSave,
+              insertedMotifs,
+              motifLayerMap,
+              imageLayerMap,
+            }).then(() => {
+              console.log('Flush save completed')
+            }).catch(err => {
+              console.error('Flush save failed:', err)
+            })
+          }
+        }
       }
     }
-  }, [])
+  }, [user?.uid, projectId, lines, uploadedImages, layers, zoom, canvasSize, generatedImages, insertedMotifs, motifLayerMap, imageLayerMap, isLoadingCanvas])
 
   // Undo/Redo functions
+  // Use a ref for historyIndex to avoid stale closure issues when drawing quickly
+  const historyIndexRef = useRef(historyIndex)
+  historyIndexRef.current = historyIndex
+
   const saveToHistory = useCallback((newLines: any[]) => {
+    // Use ref to get the current historyIndex, avoiding stale closure
+    const currentIndex = historyIndexRef.current
+
     setHistory(prev => {
-      const newHistory = prev.slice(0, historyIndex + 1)
+      // Slice from 0 to currentIndex+1 to remove any "future" history (after undo)
+      const newHistory = prev.slice(0, currentIndex + 1)
       newHistory.push([...newLines])
       // Limit history size
       if (newHistory.length > maxHistorySize) {
@@ -1941,28 +2041,99 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
       return newHistory
     })
     setHistoryIndex(prev => Math.min(prev + 1, maxHistorySize - 1))
-  }, [historyIndex, maxHistorySize])
+  }, [maxHistorySize])
 
   const undo = useCallback(() => {
-    console.log('Undo function called, historyIndex:', historyIndex, 'history.length:', history.length)
+    console.log('Undo called, historyIndex:', historyIndex, 'history.length:', history.length)
     if (historyIndex > 0) {
       const newIndex = historyIndex - 1
-      console.log('Undoing to index:', newIndex)
+      console.log('Undoing to history[', newIndex, ']:', history[newIndex]?.length, 'strokes')
       setHistoryIndex(newIndex)
-      setLines([...history[newIndex]])
+      const restoredLines = [...history[newIndex]]
+      setLines(restoredLines)
+      linesRef.current = restoredLines
     }
   }, [historyIndex, history])
 
   const redo = useCallback(() => {
+    console.log('Redo called, historyIndex:', historyIndex, 'history.length:', history.length)
     if (historyIndex < history.length - 1) {
       const newIndex = historyIndex + 1
+      console.log('Redoing to history[', newIndex, ']:', history[newIndex]?.length, 'strokes')
       setHistoryIndex(newIndex)
-      setLines([...history[newIndex]])
+      const restoredLines = [...history[newIndex]]
+      setLines(restoredLines)
+      linesRef.current = restoredLines
     }
   }, [historyIndex, history])
 
   const handleClearAllClick = useCallback(() => {
     setShowClearAllDialog(true)
+  }, [])
+
+  // NOTE: Native Pointer Events code removed - was causing infinite loops
+  // and Konva's event handlers work properly for drawing.
+  // Pressure is handled via getPointerPosition() in Konva event handlers.
+
+  // Set up gesture handler callbacks for undo/redo
+  useEffect(() => {
+    gestureHandlerRef.current.setCallbacks({
+      onUndo: undo,
+      onRedo: redo
+    })
+  }, [undo, redo])
+
+  // Native touch event handler for gesture detection
+  useEffect(() => {
+    const container = canvasContainerRef.current
+    if (!container) return
+
+    const stage = stageRef.current
+    if (!stage) return
+    const canvasElement = stage.container()
+    if (!canvasElement) return
+
+    const handleTouchStartNative = (e: TouchEvent) => {
+      const gestureType = gestureHandlerRef.current.handleTouchStart(e)
+
+      // Block default if multi-touch
+      if (e.touches.length > 1) {
+        e.preventDefault()
+      }
+    }
+
+    const handleTouchMoveNative = (e: TouchEvent) => {
+      const result = gestureHandlerRef.current.handleTouchMove(e)
+
+      if (result.blockDrawing) {
+        // Cancel any active drawing
+        drawingEngineRef.current.cancelStroke()
+        setActiveStroke(null)
+        isDrawing.current = false
+        e.preventDefault()
+      }
+    }
+
+    const handleTouchEndNative = (e: TouchEvent) => {
+      const gestureType = gestureHandlerRef.current.handleTouchEnd(e)
+
+      // Log gesture for debugging
+      if (gestureType === 'undo') {
+        console.log('Two-finger tap detected: UNDO')
+      } else if (gestureType === 'redo') {
+        console.log('Three-finger tap detected: REDO')
+      }
+    }
+
+    canvasElement.addEventListener('touchstart', handleTouchStartNative, { passive: false })
+    canvasElement.addEventListener('touchmove', handleTouchMoveNative, { passive: false })
+    canvasElement.addEventListener('touchend', handleTouchEndNative, { passive: false })
+
+    return () => {
+      canvasElement.removeEventListener('touchstart', handleTouchStartNative)
+      canvasElement.removeEventListener('touchmove', handleTouchMoveNative)
+      canvasElement.removeEventListener('touchend', handleTouchEndNative)
+    }
   }, [])
 
   const clearAll = useCallback(() => {
@@ -1977,7 +2148,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
     try {
       const motifPoints = JSON.parse(motif.data) as number[]
       console.log('Parsed motif points:', motifPoints.length, 'points')
-      
+
       if (motifPoints.length === 0) {
         console.log('Motif has no drawing data')
         return
@@ -2032,7 +2203,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
         console.log('Added motif to insertedMotifs. Total motifs:', newMotifs.length)
         return newMotifs
       })
-      
+
       // Associate motif with active layer
       setMotifLayerMap(prevMap => {
         const newMap = {
@@ -2087,65 +2258,84 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
   const getPointerPosition = (e: any) => {
     const stage = e.target.getStage()
     const containerPos = stage.getPointerPosition()
-    
+
     if (!containerPos) {
       return { x: 0, y: 0, pressure: 1, tiltX: 0, tiltY: 0, isApplePencil: false }
     }
-    
+
     // Convert container coordinates to stage coordinates
     // Account for stage position (x, y) and zoom (scale)
     const stageX = (containerPos.x - stage.x()) / zoom
     const stageY = (containerPos.y - stage.y()) / zoom
-    
-    // For Apple Pencil, try to get pressure and tilt information
-    if (e.evt && e.evt.pointerType === 'pen') {
-      const pressure = e.evt.pressure || 1
-      const tiltX = e.evt.tiltX || 0
-      const tiltY = e.evt.tiltY || 0
-      
-      return {
-        x: stageX,
-        y: stageY,
-        pressure: Math.max(0.1, Math.min(1, pressure)),
-        tiltX,
-        tiltY,
-        isApplePencil: true
-      }
-    }
-    
+
+    // Try to get pressure from various event sources
+    const evt = e.evt || e.nativeEvent || {}
+    const pressure = evt.pressure ?? 0.5  // Default to 0.5 if not available
+    const pointerType = evt.pointerType || 'mouse'
+    const tiltX = evt.tiltX || 0
+    const tiltY = evt.tiltY || 0
+
+    // Apple Pencil is detected as 'pen' pointer type
+    const isApplePencil = pointerType === 'pen'
+
+    // Use actual pressure for pen, default 1 for touch/mouse
+    const finalPressure = isApplePencil
+      ? Math.max(0.1, Math.min(1, pressure))
+      : 1
+
     return {
       x: stageX,
       y: stageY,
-      pressure: 1,
-      tiltX: 0,
-      tiltY: 0,
-      isApplePencil: false
+      pressure: finalPressure,
+      tiltX,
+      tiltY,
+      isApplePencil
     }
   }
 
-  // Simple stroke smoothing: moving average over the last few points
-  const SMOOTHING_WINDOW = 4
-  const smoothLinePoints = (points: number[]): number[] => {
-    if (points.length <= 4) return points
-    const smoothed: number[] = []
-    for (let i = 0; i < points.length; i += 2) {
-      const windowPointsX: number[] = []
-      const windowPointsY: number[] = []
-      for (let j = Math.max(0, i - (SMOOTHING_WINDOW - 1) * 2); j <= i; j += 2) {
-        windowPointsX.push(points[j])
-        windowPointsY.push(points[j + 1])
-      }
-      const avgX = windowPointsX.reduce((a, b) => a + b, 0) / windowPointsX.length
-      const avgY = windowPointsY.reduce((a, b) => a + b, 0) / windowPointsY.length
-      smoothed.push(avgX, avgY)
+  // Pull-String Stabilization Algorithm (Procreate-style StreamLine)
+  // The brush position follows the input at a fixed distance (string length)
+  // Small movements within the string length are absorbed, creating smooth lines
+  const applyPullStringStabilization = (
+    inputX: number,
+    inputY: number,
+    brushPos: { x: number; y: number } | null,
+    stringLength: number
+  ): { x: number; y: number; shouldDraw: boolean } => {
+    // If no brush position yet, just return input
+    if (!brushPos) {
+      return { x: inputX, y: inputY, shouldDraw: true }
     }
-    return smoothed
+
+    // Calculate distance from brush to input
+    const dx = inputX - brushPos.x
+    const dy = inputY - brushPos.y
+    const distance = Math.sqrt(dx * dx + dy * dy)
+
+    // If distance is less than string length, don't move the brush
+    if (distance < stringLength) {
+      return { x: brushPos.x, y: brushPos.y, shouldDraw: false }
+    }
+
+    // Move the brush towards input, maintaining string length distance
+    // New brush position is along the line from brush to input,
+    // at (distance - stringLength) from the old brush position
+    const ratio = (distance - stringLength) / distance
+    const newX = brushPos.x + dx * ratio
+    const newY = brushPos.y + dy * ratio
+
+    return { x: newX, y: newY, shouldDraw: true }
+  }
+
+  // Calculate string length based on streamLineAmount (0-1)
+  const getStringLength = () => {
+    return STRING_LENGTH_MIN + (STRING_LENGTH_MAX - STRING_LENGTH_MIN) * streamLineAmount
   }
 
   const handlePointerDown = (e: any) => {
     // Prevent default to avoid scrolling on touch devices
     e.evt.preventDefault()
-    
+
     // Ignore compare slider interactions
     const inCompareHandle = !!(
       e.target?.hasName?.('compare-handle') ||
@@ -2160,24 +2350,24 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
     if (e.target && e.target.getClassName && e.target.getClassName() === 'Image') {
       return // Don't start drawing when interacting with images
     }
-    
+
     // Palm rejection: Only allow drawing with Apple Pencil or single touch
     const pointerType = e.evt?.pointerType
     const isPalm = e.evt?.width > 20 || e.evt?.height > 20 // Large touch area indicates palm
-    
+
     if (isPalm) {
       return // Ignore palm touches
     }
-    
+
     const pointerData = getPointerPosition(e)
-    
+
     // Handle selection mode
     if (selectionMode) {
       setIsDrawingSelection(true)
       setSelectionPath([pointerData.x, pointerData.y])
       return
     }
-    
+
     // Handle crop mode
     if (cropMode && selectedImageId) {
       const selectedImage = uploadedImages.find(img => img.id === selectedImageId)
@@ -2187,10 +2377,10 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
         const imageY = selectedImage.y
         const imageWidth = selectedImage.width
         const imageHeight = selectedImage.height
-        
+
         // Check if click is within image bounds
         if (pointerData.x >= imageX && pointerData.x <= imageX + imageWidth &&
-            pointerData.y >= imageY && pointerData.y <= imageY + imageHeight) {
+          pointerData.y >= imageY && pointerData.y <= imageY + imageHeight) {
           setIsDrawingCrop(true)
           setCropArea({
             x: pointerData.x,
@@ -2202,41 +2392,48 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
       }
       return
     }
-    
+
     // Only allow drawing with brush and eraser tools
     if (tool !== 'brush' && tool !== 'eraser') {
       return
     }
-    
+
     isDrawing.current = true
-    
+
+    // Initialize brush position for Pull-String stabilization
+    brushPositionRef.current = { x: pointerData.x, y: pointerData.y }
+
+    // Debug: Log pressure detection
+    console.log('🎨 Pointer Down - isApplePencil:', pointerData.isApplePencil, 'pressure:', pointerData.pressure)
+
     // Update Apple Pencil status and pressure
     setIsApplePencilActive(pointerData.isApplePencil)
     setCurrentPressure(pointerData.pressure)
-    
+
     // Calculate dynamic brush size based on pressure (for Apple Pencil)
     const pressureMultiplier = pointerData.isApplePencil ? pointerData.pressure : 1
     const dynamicSize = Math.max(1, size * pressureMultiplier)
-    
+
     // Calculate dynamic opacity based on pressure
     const dynamicOpacity = Math.max(0.1, brushOpacity * pressureMultiplier)
-    
-    const newLine = { 
-      tool, 
-      points: [pointerData.x, pointerData.y], 
-      stroke: color, 
-      strokeWidth: dynamicSize, 
+
+    const newLine = {
+      tool,
+      points: [pointerData.x, pointerData.y],
+      pressures: [pointerData.pressure],  // Per-point pressure for variable width
+      stroke: color,
+      strokeWidth: size,  // Base width - actual width varies by pressure
       opacity: dynamicOpacity,
       pressure: pointerData.pressure,
       isApplePencil: pointerData.isApplePencil
     }
-    
-    // Save current state to history before starting new drawing
-    saveToHistory(lines)
-    
+
+    // History is saved in handlePointerUp after stroke completes
+
     // Add the new line and associate it with the active layer
     setLines(prev => {
       const newLines = [...prev, newLine]
+      linesRef.current = newLines  // Keep ref in sync
       setLineLayerMap(prevMap => ({
         ...prevMap,
         [newLines.length - 1]: activeLayerId
@@ -2261,7 +2458,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
       setSelectionPath(prev => [...prev, pointerData.x, pointerData.y])
       return
     }
-    
+
     // Handle crop area drawing
     if (cropMode && isDrawingCrop && selectedImageId) {
       const selectedImage = uploadedImages.find(img => img.id === selectedImageId)
@@ -2271,14 +2468,14 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
         const imageY = selectedImage.y
         const imageWidth = selectedImage.width
         const imageHeight = selectedImage.height
-        
+
         setCropArea(prev => {
           if (!prev) return null
-          
+
           // Constrain the crop area to within the image bounds
           const newWidth = Math.max(0, Math.min(pointerData.x - prev.x, imageX + imageWidth - prev.x))
           const newHeight = Math.max(0, Math.min(pointerData.y - prev.y, imageY + imageHeight - prev.y))
-          
+
           return {
             ...prev,
             width: newWidth,
@@ -2288,9 +2485,9 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
       }
       return
     }
-    
+
     if (!isDrawing.current) return
-    
+
     // Check if we're interacting with an image - if so, stop drawing
     if (e.target && e.target.getClassName && e.target.getClassName() === 'Image') {
       isDrawing.current = false
@@ -2307,34 +2504,37 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
       isDrawing.current = false
       return
     }
-    
+
     // Prevent default to avoid scrolling on touch devices
     e.evt.preventDefault()
-    
+
     const stage = e.target.getStage()
     const pointerData = getPointerPosition(e)
-    
+
     // Update pressure tracking
     setCurrentPressure(pointerData.pressure)
-    
+
     // Calculate dynamic brush size based on pressure
     const pressureMultiplier = pointerData.isApplePencil ? pointerData.pressure : 1
     const dynamicSize = Math.max(1, size * pressureMultiplier)
-    
+
     // Calculate dynamic opacity based on pressure
     const dynamicOpacity = Math.max(0.1, brushOpacity * pressureMultiplier)
-    
+
+    // Use raw points directly for ZERO DELAY
+    // Konva's tension property will smooth the visual rendering
     setLines(prev => {
       const next = prev.slice()
       const last = next[next.length - 1]
-      
-      // Add raw point
+
+      // Add raw point instantly (no stabilization delay)
       last.points = last.points.concat([pointerData.x, pointerData.y])
-      // Apply smoothing to points for a more Procreate-like feel
-      last.points = smoothLinePoints(last.points)
-      
-      // Update stroke width and opacity based on pressure
-      last.strokeWidth = dynamicSize
+
+      // Store pressure for this point (for variable width rendering)
+      if (!last.pressures) last.pressures = []
+      last.pressures.push(pointerData.pressure)
+
+      // Update opacity based on pressure
       last.opacity = dynamicOpacity
       last.pressure = pointerData.pressure
 
@@ -2342,7 +2542,8 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
       if (isCreatingMotif) {
         setMotifDrawingLines(prev => [...prev, pointerData.x, pointerData.y])
       }
-      
+
+      linesRef.current = next  // Keep ref in sync
       return next
     })
   }
@@ -2352,35 +2553,35 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
     e.evt.preventDefault()
     // Clear compare pointer active on any pointer up
     isComparePointerActiveRef.current = false
-    
+
     // Handle selection completion
     if (selectionMode && isDrawingSelection) {
       setIsDrawingSelection(false)
-      
+
       // Find content within the selection path
       const selectedContent: any[] = []
-      
+
       // Check lines within selection - only get selected points
       lines.forEach((line, lineIndex) => {
         const selectedPoints = getSelectedLinePoints(line.points, selectionPath)
         if (selectedPoints && selectedPoints.length >= 4) { // Need at least 2 points
-          selectedContent.push({ 
-            ...line, 
-            type: 'line', 
+          selectedContent.push({
+            ...line,
+            type: 'line',
             id: `line_${Date.now()}_${lineIndex}`,
             points: selectedPoints,
             isPartial: selectedPoints.length < line.points.length
           })
         }
       })
-      
+
       // Check images within selection - get crop data
       uploadedImages.forEach((image, imageIndex) => {
         const imageSelectionData = getImageSelectionData(image, selectionPath)
         if (imageSelectionData) {
-          selectedContent.push({ 
-            ...image, 
-            type: 'image', 
+          selectedContent.push({
+            ...image,
+            type: 'image',
             originalId: image.id,
             id: `img_${Date.now()}_${imageIndex}`,
             cropX: imageSelectionData.cropX,
@@ -2395,19 +2596,25 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
           })
         }
       })
-      
+
       setSelectedArea(selectedContent)
       console.log('Selection completed - Found', selectedContent.length, 'items')
       return
     }
-    
+
     // Handle crop completion
     if (cropMode && isDrawingCrop) {
       setIsDrawingCrop(false)
       // Crop area is now complete, user can apply or cancel
       return
     }
-    
+
+    // Save completed stroke to history for undo/redo
+    if (isDrawing.current) {
+      // Use linesRef to get the current lines including the stroke just completed
+      saveToHistory(linesRef.current)
+    }
+
     isDrawing.current = false
   }
 
@@ -2451,10 +2658,10 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
   const handleTouchStart = (e: any) => {
     // Prevent default to avoid scrolling
     e.evt.preventDefault()
-    
+
     const touches = e.evt.touches
     const touchCount = touches.length
-    
+
     if (touchCount === 1) {
       // Check if we're interacting with an image - if so, don't start drawing
       if (e.target && e.target.getClassName && e.target.getClassName() === 'Image') {
@@ -2473,10 +2680,10 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
   const handleTouchMove = (e: any) => {
     // Prevent default to avoid scrolling
     e.evt.preventDefault()
-    
+
     const touches = e.evt.touches
     const touchCount = touches.length
-    
+
     if (touchCount === 1 && !isGesturing) {
       // Check if we're interacting with an image - if so, stop drawing
       if (e.target && e.target.getClassName && e.target.getClassName() === 'Image') {
@@ -2489,36 +2696,36 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
       // Two finger touch - handle zoom and pan
       const currentDistance = getTouchDistance(touches)
       const currentCenter = getTouchCenter(touches)
-      
+
       if (lastTouchDistance > 0) {
         const stage = e.target.getStage()
         if (!stage) return
-        
+
         // Get container element to convert screen coordinates to container coordinates
         const container = stage.container()
         const containerRect = container.getBoundingClientRect()
-        
+
         // Convert current touch center from screen coordinates to container coordinates
         const currentPointerPos = {
           x: currentCenter.x - containerRect.left,
           y: currentCenter.y - containerRect.top
         }
-        
+
         // Convert last touch center from screen coordinates to container coordinates
         const lastPointerPos = {
           x: lastTouchCenter.x - containerRect.left,
           y: lastTouchCenter.y - containerRect.top
         }
-        
+
         // Get current stage position and zoom
         const oldZoom = zoom
         const oldStageX = stage.x()
         const oldStageY = stage.y()
-        
+
         // Pinch to zoom
         const scale = currentDistance / lastTouchDistance
         const newZoom = Math.max(minZoom, Math.min(maxZoom, oldZoom * scale))
-        
+
         // If zooming out to 100% (minZoom), reset to centered position
         if (newZoom === minZoom) {
           setZoom(newZoom)
@@ -2528,25 +2735,25 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
           setLastTouchCenter(currentCenter)
           return
         }
-        
+
         // Calculate zoom adjustment: adjust stage position to keep the current pinch center fixed
         // Formula: newPos = oldPos - (pointerPos - oldPos) * (newZoom - oldZoom) / oldZoom
         let newStageX = oldStageX - (currentPointerPos.x - oldStageX) * (newZoom - oldZoom) / oldZoom
         let newStageY = oldStageY - (currentPointerPos.y - oldStageY) * (newZoom - oldZoom) / oldZoom
-        
+
         // Also handle panning: adjust for center movement
         // The pan delta is the difference in center positions, accounting for zoom
         const panDx = (currentPointerPos.x - lastPointerPos.x)
         const panDy = (currentPointerPos.y - lastPointerPos.y)
         newStageX += panDx
         newStageY += panDy
-        
+
         // Update zoom and stage position
         setZoom(newZoom)
         stage.x(newStageX)
         stage.y(newStageY)
       }
-      
+
       setLastTouchDistance(currentDistance)
       setLastTouchCenter(currentCenter)
     }
@@ -2555,10 +2762,10 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
   const handleTouchEnd = (e: any) => {
     // Prevent default to avoid scrolling
     e.evt.preventDefault()
-    
+
     const touches = e.evt.touches
     const touchCount = touches.length
-    
+
     if (touchCount === 0) {
       // All touches ended
       if (isGesturing) {
@@ -2578,55 +2785,60 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
   const handleWheel = (e: any) => {
     // Check if this is a pinch gesture (ctrlKey on Windows/Linux, metaKey or ctrlKey on macOS)
     const isPinchGesture = e.evt.ctrlKey || e.evt.metaKey
-    
+
     // Allow zoom with regular mouse wheel OR pinch gesture
-      e.evt.preventDefault()
-      
-      const stage = e.target.getStage()
-      if (!stage) return
-      
-      // Get pointer position in container coordinates (unscaled)
-      const pointerPos = stage.getPointerPosition()
-      if (!pointerPos) return
-      
-      // Get current stage position and zoom
-      const oldZoom = zoom
-      const oldStageX = stage.x()
-      const oldStageY = stage.y()
-      
-      // Calculate zoom delta
-      // Negative deltaY = zoom in, positive deltaY = zoom out
+    e.evt.preventDefault()
+
+    const stage = e.target.getStage()
+    if (!stage) return
+
+    // Get pointer position in container coordinates (unscaled)
+    const pointerPos = stage.getPointerPosition()
+    if (!pointerPos) return
+
+    // Get current stage position and zoom
+    const oldZoom = zoom
+    const oldStageX = stage.x()
+    const oldStageY = stage.y()
+
+    // Calculate zoom delta
+    // Negative deltaY = zoom in, positive deltaY = zoom out
     // Use different sensitivity for regular wheel vs pinch
     const zoomSpeed = isPinchGesture ? 0.01 : 0.05 // More sensitive for regular mouse wheel
-      const zoomDelta = -e.evt.deltaY * zoomSpeed
-      
-      // Calculate new zoom with constraints
-      const newZoom = Math.max(minZoom, Math.min(maxZoom, oldZoom + zoomDelta))
-      
-      // If zoom didn't change, don't update
-      if (newZoom === oldZoom) return
-      
-      // If zooming out to 100% (minZoom), reset to centered position
-      if (newZoom === minZoom) {
-        setZoom(newZoom)
-        stage.x(0)
-        stage.y(0)
-        return
-      }
-      
-      // For zooming in, keep the point under cursor fixed
-      // Formula: newPos = oldPos - (pointerPos - oldPos) * (newZoom - oldZoom) / oldZoom
-      const newStageX = oldStageX - (pointerPos.x - oldStageX) * (newZoom - oldZoom) / oldZoom
-      const newStageY = oldStageY - (pointerPos.y - oldStageY) * (newZoom - oldZoom) / oldZoom
-      
-      // Update zoom and stage position
+    const zoomDelta = -e.evt.deltaY * zoomSpeed
+
+    // Calculate new zoom with constraints
+    const newZoom = Math.max(minZoom, Math.min(maxZoom, oldZoom + zoomDelta))
+
+    // If zoom didn't change, don't update
+    if (newZoom === oldZoom) return
+
+    // If zooming out to 100% (minZoom), reset to centered position
+    if (newZoom === minZoom) {
       setZoom(newZoom)
-      stage.x(newStageX)
-      stage.y(newStageY)
+      stage.x(0)
+      stage.y(0)
+      return
+    }
+
+    // For zooming in, keep the point under cursor fixed
+    // Formula: newPos = oldPos - (pointerPos - oldPos) * (newZoom - oldZoom) / oldZoom
+    const newStageX = oldStageX - (pointerPos.x - oldStageX) * (newZoom - oldZoom) / oldZoom
+    const newStageY = oldStageY - (pointerPos.y - oldStageY) * (newZoom - oldZoom) / oldZoom
+
+    // Update zoom and stage position
+    setZoom(newZoom)
+    stage.x(newStageX)
+    stage.y(newStageY)
   }
 
   // Floating toolbar drag handlers
   const handleToolbarMouseDown = (e: React.MouseEvent) => {
+    // Don't start drag if clicking on a button/interactive element
+    const target = e.target as HTMLElement
+    if (target.closest('button') || target.closest('input') || target.closest('[role="button"]')) {
+      return // Let the button handle the click
+    }
     e.preventDefault()
     setIsDragging(true)
     const rect = e.currentTarget.getBoundingClientRect()
@@ -2637,6 +2849,11 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
   }
 
   const handleToolbarTouchStart = (e: React.TouchEvent) => {
+    // Don't start drag if touching a button/interactive element
+    const target = e.target as HTMLElement
+    if (target.closest('button') || target.closest('input') || target.closest('[role="button"]')) {
+      return // Let the button handle the touch
+    }
     e.preventDefault()
     setIsDragging(true)
     const rect = e.currentTarget.getBoundingClientRect()
@@ -2647,28 +2864,44 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
     })
   }
 
+  // Handle pointer events (for Apple Pencil support)
+  const handleToolbarPointerDown = (e: React.PointerEvent) => {
+    // Don't start drag if clicking on a button/interactive element
+    const target = e.target as HTMLElement
+    if (target.closest('button') || target.closest('input') || target.closest('[role="button"]')) {
+      return // Let the button handle the click
+    }
+    e.preventDefault()
+    setIsDragging(true)
+    const rect = e.currentTarget.getBoundingClientRect()
+    setDragOffset({
+      x: e.clientX - rect.left,
+      y: e.clientY - rect.top
+    })
+  }
+
   const handleToolbarDrag = (e: MouseEvent | TouchEvent) => {
     if (!isDragging) return
-    
+
     e.preventDefault()
     const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX
     const clientY = 'touches' in e ? e.touches[0].clientY : e.clientY
-    
+
     const canvasContainer = document.querySelector('[data-canvas-container]') as HTMLElement
     if (!canvasContainer) return
-    
+
     const containerRect = canvasContainer.getBoundingClientRect()
     const newX = clientX - containerRect.left - dragOffset.x
     const newY = clientY - containerRect.top - dragOffset.y
-    
+
     // Constrain to canvas bounds
     const toolbarElement = document.querySelector('[data-floating-toolbar]') as HTMLElement
     const toolbarWidth = toolbarElement?.offsetWidth || 300
     const toolbarHeight = toolbarElement?.offsetHeight || 50
-    
+
     const constrainedX = Math.max(0, Math.min(newX, containerRect.width - toolbarWidth))
     const constrainedY = Math.max(0, Math.min(newY, containerRect.height - toolbarHeight))
-    
+
     setToolbarPosition({ x: constrainedX, y: constrainedY })
     setToolbarCentered(false) // Mark as manually positioned
   }
@@ -2706,7 +2939,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
         return
       }
-      
+
       // Check for Cmd+Z (Mac) or Ctrl+Z (Windows/Linux) for undo
       if ((e.metaKey || e.ctrlKey) && e.key === 'z' && !e.shiftKey) {
         e.preventDefault()
@@ -2773,13 +3006,13 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
 
     // Initial calculation
     calculateCanvasSize()
-    
+
     // Set up resize listener
     window.addEventListener('resize', handleResize)
-    
+
     // Recalculate on mount
     const timeoutId = setTimeout(calculateCanvasSize, 100)
-    
+
     return () => {
       window.removeEventListener('resize', handleResize)
       clearTimeout(timeoutId)
@@ -2787,17 +3020,17 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
   }, [calculateCanvasSize, canvasSize.width, canvasSize.height])
 
   return (
-    <Box sx={{ 
-      height: '100%', 
+    <Box sx={{
+      height: '100%',
       width: '100%',
       overflow: 'hidden',
-      display: 'grid', 
-      gridTemplateColumns: { 
-        xs: '1fr', 
-        sm: '1fr', 
+      display: 'grid',
+      gridTemplateColumns: {
+        xs: '1fr',
+        sm: '1fr',
         md: '240px 1fr 280px',
         lg: '260px 1fr 300px'
-      }, 
+      },
       gridTemplateRows: imageLibraryExpanded ? '1fr auto' : '1fr',
       // Safe area insets for notched devices
       paddingLeft: { xs: 'env(safe-area-inset-left)', md: 0 },
@@ -2805,10 +3038,10 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
       paddingTop: { xs: 'env(safe-area-inset-top)', md: 0 }
     }}>
       {/* Left Sidebar */}
-      <Box sx={{ 
-        display: { xs: 'none', sm: 'none', md: 'flex' }, 
-        flexDirection: 'column', 
-        borderRight: '1px solid', 
+      <Box sx={{
+        display: { xs: 'none', sm: 'none', md: 'flex' },
+        flexDirection: 'column',
+        borderRight: '1px solid',
         borderColor: 'divider',
         width: { md: '240px', lg: '260px' },
         overflowY: 'auto',
@@ -2827,8 +3060,8 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                 if ((e.target as HTMLElement).closest('button') || (e.target as HTMLElement).closest('input')) {
                   return
                 }
-                      console.log('Switching to layer:', l.id)
-                      setActiveLayerId(l.id)
+                console.log('Switching to layer:', l.id)
+                setActiveLayerId(l.id)
               }}
               onDoubleClick={(e) => {
                 // Don't start editing if clicking on buttons
@@ -2878,7 +3111,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                   }}
                 />
               ) : (
-              <ListItemText primary={l.name} />
+                <ListItemText primary={l.name} />
               )}
               <ListItemSecondaryAction>
                 <IconButton edge="end" size="small" onClick={(e) => {
@@ -2918,7 +3151,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                       const newLineLayerMap: { [key: number]: string } = {}
                       let newIndex = 0
                       Object.keys(currentLineLayerMap).forEach(key => {
-                          const numKey = parseInt(key)
+                        const numKey = parseInt(key)
                         if (currentLineLayerMap[numKey] !== l.id) {
                           newLineLayerMap[newIndex] = currentLineLayerMap[numKey]
                           newIndex++
@@ -2944,13 +3177,13 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
 
                       // Clean up imageLayerMap
                       const newMap = { ...currentImageLayerMap }
-                        Object.keys(newMap).forEach(key => {
-                          if (newMap[key] === l.id) {
+                      Object.keys(newMap).forEach(key => {
+                        if (newMap[key] === l.id) {
                           delete newMap[key]
-                          }
-                        })
-                        return newMap
+                        }
                       })
+                      return newMap
+                    })
 
                     // Delete all motifs from this layer
                     setMotifLayerMap(currentMotifLayerMap => {
@@ -2961,13 +3194,13 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
 
                       // Clean up motifLayerMap
                       const newMap = { ...currentMotifLayerMap }
-                        Object.keys(newMap).forEach(key => {
-                          if (newMap[key] === l.id) {
+                      Object.keys(newMap).forEach(key => {
+                        if (newMap[key] === l.id) {
                           delete newMap[key]
-                          }
-                        })
-                        return newMap
+                        }
                       })
+                      return newMap
+                    })
 
                     // Set active layer to the first remaining layer
                     const remainingLayers = layers.filter(x => x.id !== l.id)
@@ -2982,13 +3215,13 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
             </ListItem>
           ))}
         </List>
-          <Box sx={{ p: 2, borderTop: '1px solid', borderColor: 'divider' }}>
-            <Button fullWidth startIcon={<Add />} onClick={() => {
-              const newLayerId = String(Date.now())
-              setLayers(prev => [...prev, { id: newLayerId, name: `Layer ${prev.length + 1}`, visible: true, opacity: 1 }])
-              setActiveLayerId(newLayerId)
-            }}>Add Layer</Button>
-          </Box>
+        <Box sx={{ p: 2, borderTop: '1px solid', borderColor: 'divider' }}>
+          <Button fullWidth startIcon={<Add />} onClick={() => {
+            const newLayerId = String(Date.now())
+            setLayers(prev => [...prev, { id: newLayerId, name: `Layer ${prev.length + 1}`, visible: true, opacity: 1 }])
+            setActiveLayerId(newLayerId)
+          }}>Add Layer</Button>
+        </Box>
         <Divider />
         <Box sx={{ p: 2 }}>
           <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
@@ -3131,17 +3364,17 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
             <Box sx={{ mt: 2 }}>
               <Typography variant="subtitle2" sx={{ mb: 1 }}>Pressure</Typography>
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                <Box sx={{ 
-                  width: '100%', 
-                  height: 8, 
-                  bgcolor: 'grey.200', 
-                  borderRadius: 1, 
+                <Box sx={{
+                  width: '100%',
+                  height: 8,
+                  bgcolor: 'grey.200',
+                  borderRadius: 1,
                   overflow: 'hidden',
                   position: 'relative'
                 }}>
-                  <Box sx={{ 
-                    width: `${currentPressure * 100}%`, 
-                    height: '100%', 
+                  <Box sx={{
+                    width: `${currentPressure * 100}%`,
+                    height: '100%',
                     bgcolor: 'primary.main',
                     transition: 'width 0.1s ease-out'
                   }} />
@@ -3164,31 +3397,31 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
       </Box>
 
       {/* Canvas Center */}
-      <Box 
+      <Box
         data-canvas-container
-        sx={{ 
-          position: 'relative', 
-          overflow: 'hidden', 
-          p: { xs: 1, sm: 2 }, 
-          display: 'flex', 
-          alignItems: 'center', 
+        sx={{
+          position: 'relative',
+          overflow: 'hidden',
+          p: { xs: 1, sm: 2 },
+          display: 'flex',
+          alignItems: 'center',
           justifyContent: 'center',
           bgcolor: 'background.default',
           height: '100%',
           minHeight: '500px',
-          cursor: tool === 'brush' ? getBrushCursor(size) : 
-                  tool === 'eraser' ? getEraserCursor(size) : 
-                  'default'
+          cursor: tool === 'brush' ? getBrushCursor(size) :
+            tool === 'eraser' ? getEraserCursor(size) :
+              'default'
         }}
       >
         {/* Canvas frame */}
-        <Box sx={{ 
-          position: 'relative', 
-          borderRadius: 2, 
-          boxShadow: '0 8px 24px rgba(0,0,0,0.08)', 
-          border: '1px solid', 
-          borderColor: 'divider', 
-          overflow: 'hidden', 
+        <Box sx={{
+          position: 'relative',
+          borderRadius: 2,
+          boxShadow: '0 8px 24px rgba(0,0,0,0.08)',
+          border: '1px solid',
+          borderColor: 'divider',
+          overflow: 'hidden',
           // Force whiteboard to stay white in both light and dark modes
           bgcolor: '#ffffff',
           width: '100%',
@@ -3200,196 +3433,161 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
           MozUserSelect: 'none',
           msUserSelect: 'none'
         }}>
-        <Stage
-          ref={stageRef}
-          width={canvasSize.width}
-          height={canvasSize.height}
-          onMouseDown={handlePointerDown}
-          onMouseMove={handlePointerMove}
-          onMouseUp={handlePointerUp}
-          onTouchStart={handleTouchStart}
-          onTouchMove={handleTouchMove}
-          onTouchEnd={handleTouchEnd}
-          onWheel={handleWheel}
-          onClick={(e) => {
-            // Deselect image and motif if clicking on empty space
-            if (e.target === e.target.getStage()) {
-              setSelectedImageId(null)
-              setSelectedMotifId(null)
-              if (transformerRef.current) {
-                transformerRef.current.nodes([])
-                transformerRef.current.getLayer().batchDraw()
-              }
-            }
-          }}
-          onTap={(e) => {
-            // Deselect image and motif if tapping on empty space
-            if (e.target === e.target.getStage()) {
-              setSelectedImageId(null)
-              setSelectedMotifId(null)
-              if (transformerRef.current) {
-                transformerRef.current.nodes([])
-                transformerRef.current.getLayer().batchDraw()
-              }
-            }
-          }}
-          scaleX={zoom}
-          scaleY={zoom}
-        >
-          {/* Background layer for export - ensures white background in snapshots */}
-          <Layer>
-            <Rect
-              x={0}
-              y={0}
-              width={canvasSize.width / zoom}
-              height={canvasSize.height / zoom}
-              fill="#ffffff"
-              listening={false}
-            />
-          </Layer>
-          {/* Render each layer separately */}
-          {layers.map((layer) => (
-            <Layer 
-              key={layer.id} 
-              visible={layer.visible} 
-              opacity={layer.opacity}
-            >
-              {/* Render lines for this layer */}
-              {lines.map((line, i) => {
-                const lineLayerId = lineLayerMap[i]
-                if (lineLayerId !== layer.id) return null
-                
-                return (
-                  <Line
-                    key={i}
-                    points={line.points}
-                    stroke={line.tool === 'eraser' ? '#ffffff' : line.stroke}
-                    strokeWidth={line.strokeWidth}
-                    opacity={line.opacity ?? 1}
-                    tension={0.5}
-                    lineCap="round"
-                    lineJoin="round"
-                    globalCompositeOperation={line.tool === 'eraser' ? 'destination-out' : 'source-over'}
-                  />
-                )
-              })}
-              
-              {/* Render images for this layer */}
-              {uploadedImages.map((image) => {
-                const imageLayerId = imageLayerMap[image.id]
-                if (imageLayerId !== layer.id) return null
-                
-                console.log('Rendering image:', image.id, 'on layer:', layer.id, 'imageElement exists:', !!imageElements[image.id])
-                
-                // Don't render if image element doesn't exist yet
-                if (!imageElements[image.id]) {
-                  console.log('Image element not ready yet for:', image.id)
-                  return null
+          <Stage
+            ref={stageRef}
+            width={canvasSize.width}
+            height={canvasSize.height}
+            onMouseDown={handlePointerDown}
+            onMouseMove={handlePointerMove}
+            onMouseUp={handlePointerUp}
+            onTouchStart={handleTouchStart}
+            onTouchMove={handleTouchMove}
+            onTouchEnd={handleTouchEnd}
+            onWheel={handleWheel}
+            onClick={(e) => {
+              // Deselect image and motif if clicking on empty space
+              if (e.target === e.target.getStage()) {
+                setSelectedImageId(null)
+                setSelectedMotifId(null)
+                if (transformerRef.current) {
+                  transformerRef.current.nodes([])
+                  transformerRef.current.getLayer().batchDraw()
                 }
-                
-                return (
-                      <Group key={image.id}>
-                        {/* Image with polygon mask if it's a partial selection */}
-                        {image.usePolygonMask && image.selectionPolygon ? (
-                          <Group>
-                            {/* Create a mask using the selection polygon */}
-                            <Line
-                              points={image.selectionPolygon}
-                              fill="black"
-                              closed={true}
-                              globalCompositeOperation="source-in"
-                            />
-                            <KonvaImage
-                              image={imageElements[image.id]}
-                              x={image.x}
-                              y={image.y}
-                              width={image.width}
-                              height={image.height}
-                              rotation={image.rotation}
-                              scaleX={image.scaleX}
-                              scaleY={image.scaleY}
-                              draggable={tool === 'hand'}
-                              listening={tool === 'hand' || (!isDrawing && tool !== 'brush' && tool !== 'eraser')}
-                              onDragEnd={(e) => {
-                                setUploadedImages(prev => 
-                                  prev.map(img => 
-                                    img.id === image.id 
-                                      ? { ...img, x: e.target.x(), y: e.target.y() }
-                                      : img
-                                  )
-                                )
-                              }}
-                              onTransform={(e) => {
-                                const node = e.target
-                                const angle = node.rotation()
-                                // position overlay slightly above the image center
-                                const cx = node.x() + (node.width() * node.scaleX()) / 2
-                                const cy = node.y() - 12
-                                setRotationOverlay({ imageId: image.id, angle, x: cx, y: cy })
-                              }}
-                              onTransformEnd={(e) => {
-                                const node = e.target
-                                const scaleX = node.scaleX()
-                                const scaleY = node.scaleY()
-                                
-                                // Calculate new dimensions maintaining aspect ratio
-                                const newWidth = Math.max(10, node.width() * scaleX)
-                                const newHeight = Math.max(10, node.height() * scaleY)
-                                
-                                setUploadedImages(prev => 
-                                  prev.map(img => 
-                                    img.id === image.id 
-                                      ? { 
-                                          ...img, 
-                                          x: node.x(),
-                                          y: node.y(),
-                                          width: newWidth,
-                                          height: newHeight,
-                                          scaleX: 1,
-                                          scaleY: 1,
-                                          rotation: node.rotation()
-                                        }
-                                      : img
-                                  )
-                                )
-                                
-                                // Reset scale
-                                node.scaleX(1)
-                                node.scaleY(1)
-                                setRotationOverlay(null)
-                              }}
-                              onClick={(e) => {
-                                // Only allow selection with hand tool or when not drawing
-                                if (tool !== 'hand' && (isDrawing || tool === 'brush' || tool === 'eraser')) {
-                                  e.cancelBubble = true
-                                  return
-                                }
-                                setSelectedImageId(image.id)
-                                // Attach transformer to selected image
-                                if (transformerRef.current) {
-                                  transformerRef.current.nodes([e.target])
-                                  transformerRef.current.getLayer().batchDraw()
-                                }
-                              }}
-                              onTap={(e) => {
-                                // Only allow selection with hand tool or when not drawing
-                                if (tool !== 'hand' && (isDrawing || tool === 'brush' || tool === 'eraser')) {
-                                  e.cancelBubble = true
-                                  return
-                                }
-                                setSelectedImageId(image.id)
-                                // Attach transformer to selected image
-                                if (transformerRef.current) {
-                                  transformerRef.current.nodes([e.target])
-                                  transformerRef.current.getLayer().batchDraw()
-                                }
-                              }}
-                              stroke={selectedImageId === image.id ? '#2196f3' : 'transparent'}
-                              strokeWidth={selectedImageId === image.id ? 2 : 0}
-                            />
-                          </Group>
-                        ) : (
-                          /* Regular image without mask */
+              }
+            }}
+            onTap={(e) => {
+              // Deselect image and motif if tapping on empty space
+              if (e.target === e.target.getStage()) {
+                setSelectedImageId(null)
+                setSelectedMotifId(null)
+                if (transformerRef.current) {
+                  transformerRef.current.nodes([])
+                  transformerRef.current.getLayer().batchDraw()
+                }
+              }
+            }}
+            scaleX={zoom}
+            scaleY={zoom}
+          >
+            {/* Background layer for export - ensures white background in snapshots */}
+            <Layer>
+              <Rect
+                x={0}
+                y={0}
+                width={canvasSize.width / zoom}
+                height={canvasSize.height / zoom}
+                fill="#ffffff"
+                listening={false}
+              />
+            </Layer>
+            {/* Render each layer separately */}
+            {layers.map((layer) => (
+              <Layer
+                key={layer.id}
+                visible={layer.visible}
+                opacity={layer.opacity}
+              >
+                {/* Render lines for this layer - using variable-width for new strokes */}
+                {lines.map((line, i) => {
+                  const lineLayerId = lineLayerMap[i]
+                  if (lineLayerId !== layer.id) return null
+
+                  // Check if this line has strokeData for variable-width rendering
+                  if (line.strokeData) {
+                    const geometry = generateStrokeGeometry(line.strokeData, renderOptions)
+
+                    return (
+                      <Shape
+                        key={i}
+                        sceneFunc={(context, shape) => {
+                          if (geometry.length < 4) return
+
+                          context.beginPath()
+                          context.moveTo(geometry[0], geometry[1])
+
+                          for (let j = 2; j < geometry.length; j += 2) {
+                            context.lineTo(geometry[j], geometry[j + 1])
+                          }
+
+                          context.closePath()
+                          context.fillStrokeShape(shape)
+                        }}
+                        fill={line.tool === 'eraser' ? '#ffffff' : line.stroke}
+                        opacity={line.opacity ?? 1}
+                        globalCompositeOperation={line.tool === 'eraser' ? 'destination-out' : 'source-over'}
+                      />
+                    )
+                  }
+
+                  // Render with pressure-based stroke width (average of all pressures)
+                  const avgPressure = line.pressures && line.pressures.length > 0
+                    ? line.pressures.reduce((a: number, b: number) => a + b, 0) / line.pressures.length
+                    : (line.pressure || 1)
+                  const pressureWidth = (line.strokeWidth || 6) * avgPressure
+
+                  return (
+                    <Line
+                      key={i}
+                      points={line.points}
+                      stroke={line.tool === 'eraser' ? '#ffffff' : line.stroke}
+                      strokeWidth={Math.max(1, pressureWidth)}
+                      opacity={line.opacity ?? 1}
+                      tension={0.5}
+                      lineCap="round"
+                      lineJoin="round"
+                      globalCompositeOperation={line.tool === 'eraser' ? 'destination-out' : 'source-over'}
+                    />
+                  )
+                })}
+
+                {/* Render active stroke being drawn (for this layer) */}
+                {activeStroke && activeStroke.layerId === layer.id && (
+                  <Shape
+                    sceneFunc={(context, shape) => {
+                      const geometry = generateStrokeGeometry(activeStroke, renderOptions)
+                      if (geometry.length < 4) return
+
+                      context.beginPath()
+                      context.moveTo(geometry[0], geometry[1])
+
+                      for (let j = 2; j < geometry.length; j += 2) {
+                        context.lineTo(geometry[j], geometry[j + 1])
+                      }
+
+                      context.closePath()
+                      context.fillStrokeShape(shape)
+                    }}
+                    fill={activeStroke.tool === 'eraser' ? '#ffffff' : activeStroke.color}
+                    opacity={activeStroke.opacity}
+                    globalCompositeOperation={activeStroke.tool === 'eraser' ? 'destination-out' : 'source-over'}
+                  />
+                )}
+
+                {/* Render images for this layer */}
+                {uploadedImages.map((image) => {
+                  const imageLayerId = imageLayerMap[image.id]
+                  if (imageLayerId !== layer.id) return null
+
+                  console.log('Rendering image:', image.id, 'on layer:', layer.id, 'imageElement exists:', !!imageElements[image.id])
+
+                  // Don't render if image element doesn't exist yet
+                  if (!imageElements[image.id]) {
+                    console.log('Image element not ready yet for:', image.id)
+                    return null
+                  }
+
+                  return (
+                    <Group key={image.id}>
+                      {/* Image with polygon mask if it's a partial selection */}
+                      {image.usePolygonMask && image.selectionPolygon ? (
+                        <Group>
+                          {/* Create a mask using the selection polygon */}
+                          <Line
+                            points={image.selectionPolygon}
+                            fill="black"
+                            closed={true}
+                            globalCompositeOperation="source-in"
+                          />
                           <KonvaImage
                             image={imageElements[image.id]}
                             x={image.x}
@@ -3399,17 +3597,12 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                             rotation={image.rotation}
                             scaleX={image.scaleX}
                             scaleY={image.scaleY}
-                            // Handle partial selection cropping
-                            cropX={image.cropX ? image.cropX * (imageElements[image.id]?.width || 0) : 0}
-                            cropY={image.cropY ? image.cropY * (imageElements[image.id]?.height || 0) : 0}
-                            cropWidth={image.cropWidth ? image.cropWidth * (imageElements[image.id]?.width || 0) : imageElements[image.id]?.width || 0}
-                            cropHeight={image.cropHeight ? image.cropHeight * (imageElements[image.id]?.height || 0) : imageElements[image.id]?.height || 0}
                             draggable={tool === 'hand'}
                             listening={tool === 'hand' || (!isDrawing && tool !== 'brush' && tool !== 'eraser')}
                             onDragEnd={(e) => {
-                              setUploadedImages(prev => 
-                                prev.map(img => 
-                                  img.id === image.id 
+                              setUploadedImages(prev =>
+                                prev.map(img =>
+                                  img.id === image.id
                                     ? { ...img, x: e.target.x(), y: e.target.y() }
                                     : img
                                 )
@@ -3418,6 +3611,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                             onTransform={(e) => {
                               const node = e.target
                               const angle = node.rotation()
+                              // position overlay slightly above the image center
                               const cx = node.x() + (node.width() * node.scaleX()) / 2
                               const cy = node.y() - 12
                               setRotationOverlay({ imageId: image.id, angle, x: cx, y: cy })
@@ -3426,28 +3620,28 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                               const node = e.target
                               const scaleX = node.scaleX()
                               const scaleY = node.scaleY()
-                              
+
                               // Calculate new dimensions maintaining aspect ratio
                               const newWidth = Math.max(10, node.width() * scaleX)
                               const newHeight = Math.max(10, node.height() * scaleY)
-                              
-                              setUploadedImages(prev => 
-                                prev.map(img => 
-                                  img.id === image.id 
-                                    ? { 
-                                        ...img, 
-                                        x: node.x(),
-                                        y: node.y(),
-                                        width: newWidth,
-                                        height: newHeight,
-                                        scaleX: 1,
-                                        scaleY: 1,
-                                        rotation: node.rotation()
-                                      }
+
+                              setUploadedImages(prev =>
+                                prev.map(img =>
+                                  img.id === image.id
+                                    ? {
+                                      ...img,
+                                      x: node.x(),
+                                      y: node.y(),
+                                      width: newWidth,
+                                      height: newHeight,
+                                      scaleX: 1,
+                                      scaleY: 1,
+                                      rotation: node.rotation()
+                                    }
                                     : img
                                 )
                               )
-                              
+
                               // Reset scale
                               node.scaleX(1)
                               node.scaleY(1)
@@ -3482,427 +3676,522 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                             stroke={selectedImageId === image.id ? '#2196f3' : 'transparent'}
                             strokeWidth={selectedImageId === image.id ? 2 : 0}
                           />
-                        )}
-
-                        {/* Rotation overlay for this image, only show when this image is being transformed */}
-                        {rotationOverlay && rotationOverlay.imageId === image.id && (
-                          <Group>
-                            <Text
-                              x={rotationOverlay.x}
-                              y={rotationOverlay.y}
-                              text={`${Math.round((rotationOverlay.angle % 360 + 360) % 360)}°`}
-                              fontSize={12}
-                              fill="#fff"
-                              align="center"
-                              offsetX={8}
-                              padding={4}
-                              shadowColor="rgba(0,0,0,0.5)"
-                              shadowBlur={4}
-                              shadowOffset={{ x: 0, y: 1 }}
-                              shadowOpacity={0.6}
-                            />
-                          </Group>
-                        )}
-                      </Group>
-                    )
-                  })}
-
-              {/* Render motifs for this layer */}
-              {insertedMotifs.map((motif) => {
-                const motifLayerId = motifLayerMap[motif.id]
-                if (motifLayerId !== layer.id) return null
-                
-                console.log('Rendering motif:', motif.name, 'on layer:', layer.id, 'selected:', selectedMotifId === motif.id)
-                
-                try {
-                  const motifPoints = JSON.parse(motif.data) as number[]
-                  // Normalize points to the motif group's local coordinates (top-left at 0,0)
-                  let minPX = Infinity, minPY = Infinity
-                  for (let i = 0; i < motifPoints.length; i += 2) {
-                    const px = motifPoints[i]
-                    const py = motifPoints[i + 1]
-                    if (px < minPX) minPX = px
-                    if (py < minPY) minPY = py
-                  }
-                  const relativePoints: number[] = []
-                  for (let i = 0; i < motifPoints.length; i += 2) {
-                    relativePoints.push(motifPoints[i] - minPX, motifPoints[i + 1] - minPY)
-                  }
-                  
-                  return (
-                    <Group key={motif.id}>
-                      {/* Motif outline/border when selected */}
-                      <Rect
-                        x={motif.x - 2}
-                        y={motif.y - 2}
-                        width={motif.width + 4}
-                        height={motif.height + 4}
-                        stroke={selectedMotifId === motif.id ? '#2196f3' : 'transparent'}
-                        strokeWidth={selectedMotifId === motif.id ? 2 : 0}
-                        fill="transparent"
-                        listening={false}
-                      />
-                      
-                      {/* Motif drawing */}
-                      <Group
-                        x={motif.x}
-                        y={motif.y}
-                        width={motif.width}
-                        height={motif.height}
-                        scaleX={motif.scaleX}
-                        scaleY={motif.scaleY}
-                        rotation={motif.rotation}
-                        opacity={motif.opacity}
-                        draggable={tool === 'hand'}
-                        listening={tool === 'hand' || (!isDrawing && tool !== 'brush' && tool !== 'eraser')}
-                        onClick={(e) => {
-                          // Only allow selection with hand tool or when not drawing
-                          if (tool !== 'hand' && (isDrawing || tool === 'brush' || tool === 'eraser')) {
-                            e.cancelBubble = true
-                            return
-                          }
-                          setSelectedMotifId(motif.id)
-                          setSelectedImageId(null) // Clear image selection
-                          // Attach transformer to motif GROUP (parent of clicked node)
-                          if (transformerRef.current) {
-                            transformerRef.current.nodes([e.target.getParent()])
-                            transformerRef.current.getLayer().batchDraw()
-                          }
-                        }}
-                        onDragEnd={(e) => {
-                          setInsertedMotifs(prev => 
-                            prev.map(m => 
-                              m.id === motif.id 
-                                ? { ...m, x: e.target.x(), y: e.target.y() }
-                                : m
+                        </Group>
+                      ) : (
+                        /* Regular image without mask */
+                        <KonvaImage
+                          image={imageElements[image.id]}
+                          x={image.x}
+                          y={image.y}
+                          width={image.width}
+                          height={image.height}
+                          rotation={image.rotation}
+                          scaleX={image.scaleX}
+                          scaleY={image.scaleY}
+                          // Handle partial selection cropping
+                          cropX={image.cropX ? image.cropX * (imageElements[image.id]?.width || 0) : 0}
+                          cropY={image.cropY ? image.cropY * (imageElements[image.id]?.height || 0) : 0}
+                          cropWidth={image.cropWidth ? image.cropWidth * (imageElements[image.id]?.width || 0) : imageElements[image.id]?.width || 0}
+                          cropHeight={image.cropHeight ? image.cropHeight * (imageElements[image.id]?.height || 0) : imageElements[image.id]?.height || 0}
+                          draggable={tool === 'hand'}
+                          listening={tool === 'hand' || (!isDrawing && tool !== 'brush' && tool !== 'eraser')}
+                          onDragEnd={(e) => {
+                            setUploadedImages(prev =>
+                              prev.map(img =>
+                                img.id === image.id
+                                  ? { ...img, x: e.target.x(), y: e.target.y() }
+                                  : img
+                              )
                             )
-                          )
-                        }}
-                        onTransform={(e) => {
-                          const node = e.target
-                          const angle = node.rotation()
-                          const scaleX = node.scaleX()
-                          const scaleY = node.scaleY()
-                          
-                          setInsertedMotifs(prev => 
-                            prev.map(m => 
-                              m.id === motif.id 
-                                ? { 
-                                    ...m, 
-                                    x: node.x(), 
-                                    y: node.y(), 
+                          }}
+                          onTransform={(e) => {
+                            const node = e.target
+                            const angle = node.rotation()
+                            const cx = node.x() + (node.width() * node.scaleX()) / 2
+                            const cy = node.y() - 12
+                            setRotationOverlay({ imageId: image.id, angle, x: cx, y: cy })
+                          }}
+                          onTransformEnd={(e) => {
+                            const node = e.target
+                            const scaleX = node.scaleX()
+                            const scaleY = node.scaleY()
+
+                            // Calculate new dimensions maintaining aspect ratio
+                            const newWidth = Math.max(10, node.width() * scaleX)
+                            const newHeight = Math.max(10, node.height() * scaleY)
+
+                            setUploadedImages(prev =>
+                              prev.map(img =>
+                                img.id === image.id
+                                  ? {
+                                    ...img,
+                                    x: node.x(),
+                                    y: node.y(),
+                                    width: newWidth,
+                                    height: newHeight,
+                                    scaleX: 1,
+                                    scaleY: 1,
+                                    rotation: node.rotation()
+                                  }
+                                  : img
+                              )
+                            )
+
+                            // Reset scale
+                            node.scaleX(1)
+                            node.scaleY(1)
+                            setRotationOverlay(null)
+                          }}
+                          onClick={(e) => {
+                            // Only allow selection with hand tool or when not drawing
+                            if (tool !== 'hand' && (isDrawing || tool === 'brush' || tool === 'eraser')) {
+                              e.cancelBubble = true
+                              return
+                            }
+                            setSelectedImageId(image.id)
+                            // Attach transformer to selected image
+                            if (transformerRef.current) {
+                              transformerRef.current.nodes([e.target])
+                              transformerRef.current.getLayer().batchDraw()
+                            }
+                          }}
+                          onTap={(e) => {
+                            // Only allow selection with hand tool or when not drawing
+                            if (tool !== 'hand' && (isDrawing || tool === 'brush' || tool === 'eraser')) {
+                              e.cancelBubble = true
+                              return
+                            }
+                            setSelectedImageId(image.id)
+                            // Attach transformer to selected image
+                            if (transformerRef.current) {
+                              transformerRef.current.nodes([e.target])
+                              transformerRef.current.getLayer().batchDraw()
+                            }
+                          }}
+                          stroke={selectedImageId === image.id ? '#2196f3' : 'transparent'}
+                          strokeWidth={selectedImageId === image.id ? 2 : 0}
+                        />
+                      )}
+
+                      {/* Rotation overlay for this image, only show when this image is being transformed */}
+                      {rotationOverlay && rotationOverlay.imageId === image.id && (
+                        <Group>
+                          <Text
+                            x={rotationOverlay.x}
+                            y={rotationOverlay.y}
+                            text={`${Math.round((rotationOverlay.angle % 360 + 360) % 360)}°`}
+                            fontSize={12}
+                            fill="#fff"
+                            align="center"
+                            offsetX={8}
+                            padding={4}
+                            shadowColor="rgba(0,0,0,0.5)"
+                            shadowBlur={4}
+                            shadowOffset={{ x: 0, y: 1 }}
+                            shadowOpacity={0.6}
+                          />
+                        </Group>
+                      )}
+                    </Group>
+                  )
+                })}
+
+                {/* Render motifs for this layer */}
+                {insertedMotifs.map((motif) => {
+                  const motifLayerId = motifLayerMap[motif.id]
+                  if (motifLayerId !== layer.id) return null
+
+                  console.log('Rendering motif:', motif.name, 'on layer:', layer.id, 'selected:', selectedMotifId === motif.id)
+
+                  try {
+                    const motifPoints = JSON.parse(motif.data) as number[]
+                    // Normalize points to the motif group's local coordinates (top-left at 0,0)
+                    let minPX = Infinity, minPY = Infinity
+                    for (let i = 0; i < motifPoints.length; i += 2) {
+                      const px = motifPoints[i]
+                      const py = motifPoints[i + 1]
+                      if (px < minPX) minPX = px
+                      if (py < minPY) minPY = py
+                    }
+                    const relativePoints: number[] = []
+                    for (let i = 0; i < motifPoints.length; i += 2) {
+                      relativePoints.push(motifPoints[i] - minPX, motifPoints[i + 1] - minPY)
+                    }
+
+                    return (
+                      <Group key={motif.id}>
+                        {/* Motif outline/border when selected */}
+                        <Rect
+                          x={motif.x - 2}
+                          y={motif.y - 2}
+                          width={motif.width + 4}
+                          height={motif.height + 4}
+                          stroke={selectedMotifId === motif.id ? '#2196f3' : 'transparent'}
+                          strokeWidth={selectedMotifId === motif.id ? 2 : 0}
+                          fill="transparent"
+                          listening={false}
+                        />
+
+                        {/* Motif drawing */}
+                        <Group
+                          x={motif.x}
+                          y={motif.y}
+                          width={motif.width}
+                          height={motif.height}
+                          scaleX={motif.scaleX}
+                          scaleY={motif.scaleY}
+                          rotation={motif.rotation}
+                          opacity={motif.opacity}
+                          draggable={tool === 'hand'}
+                          listening={tool === 'hand' || (!isDrawing && tool !== 'brush' && tool !== 'eraser')}
+                          onClick={(e) => {
+                            // Only allow selection with hand tool or when not drawing
+                            if (tool !== 'hand' && (isDrawing || tool === 'brush' || tool === 'eraser')) {
+                              e.cancelBubble = true
+                              return
+                            }
+                            setSelectedMotifId(motif.id)
+                            setSelectedImageId(null) // Clear image selection
+                            // Attach transformer to motif GROUP (parent of clicked node)
+                            if (transformerRef.current) {
+                              transformerRef.current.nodes([e.target.getParent()])
+                              transformerRef.current.getLayer().batchDraw()
+                            }
+                          }}
+                          onDragEnd={(e) => {
+                            setInsertedMotifs(prev =>
+                              prev.map(m =>
+                                m.id === motif.id
+                                  ? { ...m, x: e.target.x(), y: e.target.y() }
+                                  : m
+                              )
+                            )
+                          }}
+                          onTransform={(e) => {
+                            const node = e.target
+                            const angle = node.rotation()
+                            const scaleX = node.scaleX()
+                            const scaleY = node.scaleY()
+
+                            setInsertedMotifs(prev =>
+                              prev.map(m =>
+                                m.id === motif.id
+                                  ? {
+                                    ...m,
+                                    x: node.x(),
+                                    y: node.y(),
                                     rotation: angle,
                                     scaleX: scaleX,
                                     scaleY: scaleY
                                   }
-                                : m
+                                  : m
+                              )
                             )
-                          )
-                        }}
-                        onTap={(e) => {
-                          console.log('Motif tapped:', motif.name, 'Tool:', tool, 'IsDrawing:', isDrawing)
-                          // Only allow selection with hand tool or when not drawing
-                          if (tool !== 'hand' && (isDrawing || tool === 'brush' || tool === 'eraser')) {
-                            console.log('Selection blocked - wrong tool or drawing')
-                            e.cancelBubble = true
-                            return
-                          }
-                          console.log('Selecting motif:', motif.id)
-                          setSelectedMotifId(motif.id)
-                          setSelectedImageId(null) // Clear image selection
-                          // Attach transformer to selected motif
-                          if (transformerRef.current) {
-                            console.log('Attaching transformer to motif GROUP')
-                            transformerRef.current.nodes([e.target.getParent()])
-                            transformerRef.current.getLayer().batchDraw()
-                          } else {
-                            console.log('Transformer ref not available')
-                          }
-                        }}
-                      >
-                        {/* Transparent hit area to make selection easier */}
-                        <Rect
-                          x={0}
-                          y={0}
-                          width={motif.width}
-                          height={motif.height}
-                          fill="rgba(0,0,0,0.001)"
-                          listening={true}
-                        />
-                        {/* Render motif points as lines (relative to group) */}
-                        {relativePoints.length >= 4 && (
-                          <Line
-                            points={relativePoints}
-                            stroke="#000000"
-                            strokeWidth={2}
-                            hitStrokeWidth={24}
-                            opacity={1}
-                            tension={0.5}
-                            lineCap="round"
-                            lineJoin="round"
+                          }}
+                          onTap={(e) => {
+                            console.log('Motif tapped:', motif.name, 'Tool:', tool, 'IsDrawing:', isDrawing)
+                            // Only allow selection with hand tool or when not drawing
+                            if (tool !== 'hand' && (isDrawing || tool === 'brush' || tool === 'eraser')) {
+                              console.log('Selection blocked - wrong tool or drawing')
+                              e.cancelBubble = true
+                              return
+                            }
+                            console.log('Selecting motif:', motif.id)
+                            setSelectedMotifId(motif.id)
+                            setSelectedImageId(null) // Clear image selection
+                            // Attach transformer to selected motif
+                            if (transformerRef.current) {
+                              console.log('Attaching transformer to motif GROUP')
+                              transformerRef.current.nodes([e.target.getParent()])
+                              transformerRef.current.getLayer().batchDraw()
+                            } else {
+                              console.log('Transformer ref not available')
+                            }
+                          }}
+                        >
+                          {/* Transparent hit area to make selection easier */}
+                          <Rect
+                            x={0}
+                            y={0}
+                            width={motif.width}
+                            height={motif.height}
+                            fill="rgba(0,0,0,0.001)"
                             listening={true}
                           />
-                        )}
+                          {/* Render motif points as lines (relative to group) */}
+                          {relativePoints.length >= 4 && (
+                            <Line
+                              points={relativePoints}
+                              stroke="#000000"
+                              strokeWidth={2}
+                              hitStrokeWidth={24}
+                              opacity={1}
+                              tension={0.5}
+                              lineCap="round"
+                              lineJoin="round"
+                              listening={true}
+                            />
+                          )}
+                        </Group>
                       </Group>
-                    </Group>
-                  )
-                } catch (error) {
-                  console.error('Error rendering motif:', error)
-                  return null
-                }
-              })}
+                    )
+                  } catch (error) {
+                    console.error('Error rendering motif:', error)
+                    return null
+                  }
+                })}
 
-              {/* Selection path visualization - only on the first layer to avoid duplication */}
-              {layer.id === layers[0]?.id && selectionPath.length > 0 && selectionMode && (
-                <Group>
-                  {/* Dark overlay covering entire canvas */}
-                  <Rect
-                    x={0}
-                    y={0}
-                    width={canvasSize.width}
-                    height={canvasSize.height}
-                    fill="rgba(0, 0, 0, 0.3)"
-                  />
-                  {/* Clear area for selection */}
-                  <Line
-                    points={selectionPath}
-                    fill="transparent"
-                    closed={true}
-                    globalCompositeOperation="destination-out"
-                  />
-                  {/* Selection border */}
-                  <Line
-                    points={selectionPath}
-                    stroke="#2196f3"
-                    strokeWidth={2}
-                    fill="rgba(33, 150, 243, 0.1)"
-                    closed={true}
-                    dash={[5, 5]}
-                  />
-                </Group>
-              )}
-              
-              {/* Crop area visualization - only on the layer containing the selected image */}
-              {cropArea && cropMode && selectedImageId && (() => {
-                const selectedImage = uploadedImages.find(img => img.id === selectedImageId)
-                if (!selectedImage) return null
-                
-                const imageLayerId = imageLayerMap[selectedImage.id]
-                if (imageLayerId !== layer.id) return null
-                
-                return (
+                {/* Selection path visualization - only on the first layer to avoid duplication */}
+                {layer.id === layers[0]?.id && selectionPath.length > 0 && selectionMode && (
                   <Group>
-                    {/* Dark overlay outside crop area */}
+                    {/* Dark overlay covering entire canvas */}
                     <Rect
-                      x={selectedImage.x}
-                      y={selectedImage.y}
-                      width={selectedImage.width}
-                      height={selectedImage.height}
+                      x={0}
+                      y={0}
+                      width={canvasSize.width}
+                      height={canvasSize.height}
                       fill="rgba(0, 0, 0, 0.3)"
-                      globalCompositeOperation="source-over"
                     />
-                    {/* Clear area for crop selection */}
-                    <Rect
-                      x={cropArea.x}
-                      y={cropArea.y}
-                      width={cropArea.width}
-                      height={cropArea.height}
+                    {/* Clear area for selection */}
+                    <Line
+                      points={selectionPath}
                       fill="transparent"
+                      closed={true}
                       globalCompositeOperation="destination-out"
                     />
-                    {/* Crop area rectangle */}
-                    <Rect
-                      x={cropArea.x}
-                      y={cropArea.y}
-                      width={cropArea.width}
-                      height={cropArea.height}
-                      stroke="#ff9800"
+                    {/* Selection border */}
+                    <Line
+                      points={selectionPath}
+                      stroke="#2196f3"
                       strokeWidth={2}
-                      fill="rgba(255, 152, 0, 0.1)"
+                      fill="rgba(33, 150, 243, 0.1)"
+                      closed={true}
                       dash={[5, 5]}
                     />
-                    {/* Crop handles */}
-                    <Rect
-                      x={cropArea.x - 4}
-                      y={cropArea.y - 4}
-                      width={8}
-                      height={8}
-                      fill="#ff9800"
-                      stroke="#ffffff"
-                      strokeWidth={1}
-                    />
-                    <Rect
-                      x={cropArea.x + cropArea.width - 4}
-                      y={cropArea.y - 4}
-                      width={8}
-                      height={8}
-                      fill="#ff9800"
-                      stroke="#ffffff"
-                      strokeWidth={1}
-                    />
-                    <Rect
-                      x={cropArea.x - 4}
-                      y={cropArea.y + cropArea.height - 4}
-                      width={8}
-                      height={8}
-                      fill="#ff9800"
-                      stroke="#ffffff"
-                      strokeWidth={1}
-                    />
-                    <Rect
-                      x={cropArea.x + cropArea.width - 4}
-                      y={cropArea.y + cropArea.height - 4}
-                      width={8}
-                      height={8}
-                      fill="#ff9800"
-                      stroke="#ffffff"
-                      strokeWidth={1}
-                    />
                   </Group>
-                )
-              })()}
-              
-              {/* Transformer for selected image or motif - only show if selected item is on this layer */}
-              {(selectedImageId || selectedMotifId) && (() => {
-                let shouldShowTransformer = false
-                
-                if (selectedImageId) {
-                  const selectedImage = uploadedImages.find(img => img.id === selectedImageId)
-                  const imageLayerId = selectedImage ? imageLayerMap[selectedImage.id] : null
-                  shouldShowTransformer = imageLayerId === layer.id
-                }
-                
-                if (selectedMotifId) {
-                  const motifLayerId = motifLayerMap[selectedMotifId]
-                  shouldShowTransformer = motifLayerId === layer.id
-                }
-                
-                if (!shouldShowTransformer) return null
-                
-                return (
-                  <Transformer
-                    ref={transformerRef}
-                    boundBoxFunc={(oldBox, newBox) => {
-                      // Maintain aspect ratio
-                      if (Math.abs(newBox.width) < 5 || Math.abs(newBox.height) < 5) {
-                        return oldBox
-                      }
-                      return newBox
-                    }}
-                    keepRatio={true}
-                    enabledAnchors={['top-left', 'top-right', 'bottom-left', 'bottom-right']}
-                    rotateEnabled={true}
-                    borderEnabled={true}
-                    borderStroke="#2196f3"
-                    borderStrokeWidth={2}
-                    anchorStroke="#2196f3"
-                    anchorFill="#ffffff"
-                    anchorSize={8}
-                  />
-                )
-              })()}
-                </Layer>
-              ))}
-          
-          {showCanvasCompare && (
-            <Layer listening={true}>
-              {generatedImageElement && (
-                <Group
-                  clipFunc={(ctx) => {
-                    ctx.rect(0, 0, Math.max(0, Math.min(compareX, canvasSize.width)), canvasSize.height)
-                  }}
-                >
-                  {(() => {
-                    const { x, y, width, height } = getFittedImageRect(generatedImageElement, canvasSize.width, canvasSize.height)
-                    return (
-                      <KonvaImage
-                        image={generatedImageElement}
-                        x={x}
-                        y={y}
-                        width={width}
-                        height={height}
-                        listening={false}
-                      />
-                    )
-                  })()}
-                </Group>
-              )}
+                )}
 
-              {/* Vertical line */}
-              <Rect
-                x={Math.max(0, Math.min(compareX, canvasSize.width)) - 1}
-                y={0}
-                width={2}
-                height={canvasSize.height}
-                fill="#000000"
-                listening={false}
-              />
-              
-              {/* Toggle handle in center of line */}
-              <Group
-                x={Math.max(0, Math.min(compareX, canvasSize.width))}
-                y={canvasSize.height / 2}
-                draggable
-                dragBoundFunc={(pos) => ({
-                  x: Math.max(0, Math.min(pos.x, canvasSize.width)),
-                  y: canvasSize.height / 2
-                })}
-                name="compare-handle"
+                {/* Crop area visualization - only on the layer containing the selected image */}
+                {cropArea && cropMode && selectedImageId && (() => {
+                  const selectedImage = uploadedImages.find(img => img.id === selectedImageId)
+                  if (!selectedImage) return null
+
+                  const imageLayerId = imageLayerMap[selectedImage.id]
+                  if (imageLayerId !== layer.id) return null
+
+                  return (
+                    <Group>
+                      {/* Dark overlay outside crop area */}
+                      <Rect
+                        x={selectedImage.x}
+                        y={selectedImage.y}
+                        width={selectedImage.width}
+                        height={selectedImage.height}
+                        fill="rgba(0, 0, 0, 0.3)"
+                        globalCompositeOperation="source-over"
+                      />
+                      {/* Clear area for crop selection */}
+                      <Rect
+                        x={cropArea.x}
+                        y={cropArea.y}
+                        width={cropArea.width}
+                        height={cropArea.height}
+                        fill="transparent"
+                        globalCompositeOperation="destination-out"
+                      />
+                      {/* Crop area rectangle */}
+                      <Rect
+                        x={cropArea.x}
+                        y={cropArea.y}
+                        width={cropArea.width}
+                        height={cropArea.height}
+                        stroke="#ff9800"
+                        strokeWidth={2}
+                        fill="rgba(255, 152, 0, 0.1)"
+                        dash={[5, 5]}
+                      />
+                      {/* Crop handles */}
+                      <Rect
+                        x={cropArea.x - 4}
+                        y={cropArea.y - 4}
+                        width={8}
+                        height={8}
+                        fill="#ff9800"
+                        stroke="#ffffff"
+                        strokeWidth={1}
+                      />
+                      <Rect
+                        x={cropArea.x + cropArea.width - 4}
+                        y={cropArea.y - 4}
+                        width={8}
+                        height={8}
+                        fill="#ff9800"
+                        stroke="#ffffff"
+                        strokeWidth={1}
+                      />
+                      <Rect
+                        x={cropArea.x - 4}
+                        y={cropArea.y + cropArea.height - 4}
+                        width={8}
+                        height={8}
+                        fill="#ff9800"
+                        stroke="#ffffff"
+                        strokeWidth={1}
+                      />
+                      <Rect
+                        x={cropArea.x + cropArea.width - 4}
+                        y={cropArea.y + cropArea.height - 4}
+                        width={8}
+                        height={8}
+                        fill="#ff9800"
+                        stroke="#ffffff"
+                        strokeWidth={1}
+                      />
+                    </Group>
+                  )
+                })()}
+
+                {/* Transformer for selected image or motif - only show if selected item is on this layer */}
+                {(selectedImageId || selectedMotifId) && (() => {
+                  let shouldShowTransformer = false
+
+                  if (selectedImageId) {
+                    const selectedImage = uploadedImages.find(img => img.id === selectedImageId)
+                    const imageLayerId = selectedImage ? imageLayerMap[selectedImage.id] : null
+                    shouldShowTransformer = imageLayerId === layer.id
+                  }
+
+                  if (selectedMotifId) {
+                    const motifLayerId = motifLayerMap[selectedMotifId]
+                    shouldShowTransformer = motifLayerId === layer.id
+                  }
+
+                  if (!shouldShowTransformer) return null
+
+                  return (
+                    <Transformer
+                      ref={transformerRef}
+                      boundBoxFunc={(oldBox, newBox) => {
+                        // Maintain aspect ratio
+                        if (Math.abs(newBox.width) < 5 || Math.abs(newBox.height) < 5) {
+                          return oldBox
+                        }
+                        return newBox
+                      }}
+                      keepRatio={true}
+                      enabledAnchors={['top-left', 'top-right', 'bottom-left', 'bottom-right']}
+                      rotateEnabled={true}
+                      borderEnabled={true}
+                      borderStroke="#2196f3"
+                      borderStrokeWidth={2}
+                      anchorStroke="#2196f3"
+                      anchorFill="#ffffff"
+                      anchorSize={8}
+                    />
+                  )
+                })()}
+              </Layer>
+            ))}
+
+            {showCanvasCompare && (
+              <Layer listening={true}>
+                {generatedImageElement && (
+                  <Group
+                    clipFunc={(ctx) => {
+                      ctx.rect(0, 0, Math.max(0, Math.min(compareX, canvasSize.width)), canvasSize.height)
+                    }}
+                  >
+                    {(() => {
+                      const { x, y, width, height } = getFittedImageRect(generatedImageElement, canvasSize.width, canvasSize.height)
+                      return (
+                        <KonvaImage
+                          image={generatedImageElement}
+                          x={x}
+                          y={y}
+                          width={width}
+                          height={height}
+                          listening={false}
+                        />
+                      )
+                    })()}
+                  </Group>
+                )}
+
+                {/* Vertical line */}
+                <Rect
+                  x={Math.max(0, Math.min(compareX, canvasSize.width)) - 1}
+                  y={0}
+                  width={2}
+                  height={canvasSize.height}
+                  fill="#000000"
+                  listening={false}
+                />
+
+                {/* Toggle handle in center of line */}
+                <Group
+                  x={Math.max(0, Math.min(compareX, canvasSize.width))}
+                  y={canvasSize.height / 2}
+                  draggable
+                  dragBoundFunc={(pos) => ({
+                    x: Math.max(0, Math.min(pos.x, canvasSize.width)),
+                    y: canvasSize.height / 2
+                  })}
+                  name="compare-handle"
                   onMouseEnter={() => { try { stageRef.current?.container().style.setProperty('cursor', 'grab') } catch { } }}
                   onMouseLeave={() => { try { stageRef.current?.container().style.setProperty('cursor', 'default') } catch { } }}
                   onMouseDown={(e) => { e.cancelBubble = true; (e as any).evt?.preventDefault?.(); isComparePointerActiveRef.current = true; try { stageRef.current?.container().style.setProperty('cursor', 'grabbing') } catch { } }}
-                onTouchStart={(e) => { e.cancelBubble = true; (e as any).evt?.preventDefault?.(); isComparePointerActiveRef.current = true }}
-                onMouseUp={(e) => { e.cancelBubble = true; isComparePointerActiveRef.current = false }}
-                onTouchEnd={(e) => { e.cancelBubble = true; isComparePointerActiveRef.current = false }}
+                  onTouchStart={(e) => { e.cancelBubble = true; (e as any).evt?.preventDefault?.(); isComparePointerActiveRef.current = true }}
+                  onMouseUp={(e) => { e.cancelBubble = true; isComparePointerActiveRef.current = false }}
+                  onTouchEnd={(e) => { e.cancelBubble = true; isComparePointerActiveRef.current = false }}
                   onDragStart={(e) => { (e as any).evt?.preventDefault?.(); isComparePointerActiveRef.current = true; try { stageRef.current?.container().style.setProperty('cursor', 'grabbing') } catch { } }}
                   onDragEnd={() => { isComparePointerActiveRef.current = false; try { stageRef.current?.container().style.setProperty('cursor', 'grab') } catch { } }}
-                onDragMove={(e) => { (e as any).evt?.preventDefault?.(); scheduleCompareXUpdate(e.target.x()) }}
-              >
-                {/* Larger invisible hit area to make grabbing easier */}
-                <Rect
-                  x={-20}
-                  y={-40}
-                  width={40}
-                  height={80}
-                  fill="rgba(0,0,0,0)"
-                />
-                {/* Handle circle */}
-                <Circle
-                  x={0}
-                  y={0}
-                  radius={12}
-                  fill="#000000"
-                  stroke="#ffffff"
-                  strokeWidth={2}
-                />
-                {/* Grip lines inside handle */}
-                <Line
-                  points={[-4, 0, 4, 0]}
-                  stroke="#ffffff"
-                  strokeWidth={2}
-                  lineCap="round"
-                />
-                <Line
-                  points={[0, -4, 0, 4]}
-                  stroke="#ffffff"
-                  strokeWidth={2}
-                  lineCap="round"
-                />
-              </Group>
+                  onDragMove={(e) => { (e as any).evt?.preventDefault?.(); scheduleCompareXUpdate(e.target.x()) }}
+                >
+                  {/* Larger invisible hit area to make grabbing easier */}
+                  <Rect
+                    x={-20}
+                    y={-40}
+                    width={40}
+                    height={80}
+                    fill="rgba(0,0,0,0)"
+                  />
+                  {/* Handle circle */}
+                  <Circle
+                    x={0}
+                    y={0}
+                    radius={12}
+                    fill="#000000"
+                    stroke="#ffffff"
+                    strokeWidth={2}
+                  />
+                  {/* Grip lines inside handle */}
+                  <Line
+                    points={[-4, 0, 4, 0]}
+                    stroke="#ffffff"
+                    strokeWidth={2}
+                    lineCap="round"
+                  />
+                  <Line
+                    points={[0, -4, 0, 4]}
+                    stroke="#ffffff"
+                    strokeWidth={2}
+                    lineCap="round"
+                  />
+                </Group>
 
-              {/* Removed full-canvas click-to-move to allow drawing; drag the handle instead */}
-            </Layer>
-          )}
-        </Stage>
+                {/* Removed full-canvas click-to-move to allow drawing; drag the handle instead */}
+              </Layer>
+            )}
+          </Stage>
 
           {/* Remove image button - appears when any image is displayed */}
           {currentViewImageUrl && (
-          <Box
-            sx={{
-              position: 'absolute',
+            <Box
+              sx={{
+                position: 'absolute',
                 top: 20,
                 left: 20,
-              zIndex: 1000,
+                zIndex: 1000,
               }}
             >
               <Tooltip title="Remove image from canvas">
@@ -3937,63 +4226,65 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                 <Box
                   sx={{
                     mt: 1, // space below the X button
-            }}
-          >
-            <Tooltip title={currentViewImageUrl === harmonizedImageUrl ? 'Switch to Rendered' : 'Switch to Harmonized'}>
-              <IconButton
-                onClick={(e) => {
-                  e.stopPropagation()
-                  e.preventDefault()
-                  const nextView = currentViewImageUrl === harmonizedImageUrl ? renderedImageUrl : harmonizedImageUrl
-                  console.log('Toggle clicked:', { currentView: currentViewImageUrl, nextView, hasRendered: !!renderedImageUrl, hasHarmonized: !!harmonizedImageUrl })
-                  setCurrentViewImageUrl(nextView)
-                }}
-                sx={{
-                  bgcolor: 'background.paper',
-                  border: '1px solid',
-                  borderColor: 'divider',
-                  boxShadow: '0 2px 8px rgba(0,0,0,0.15)',
-                  '&:hover': {
-                    bgcolor: 'action.hover',
-                    boxShadow: '0 4px 12px rgba(0,0,0,0.2)',
-                  },
-                  width: 36,
-                  height: 36,
-                }}
-              >
-                <SwapHoriz fontSize="small" />
-              </IconButton>
-            </Tooltip>
+                  }}
+                >
+                  <Tooltip title={currentViewImageUrl === harmonizedImageUrl ? 'Switch to Rendered' : 'Switch to Harmonized'}>
+                    <IconButton
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        e.preventDefault()
+                        const nextView = currentViewImageUrl === harmonizedImageUrl ? renderedImageUrl : harmonizedImageUrl
+                        console.log('Toggle clicked:', { currentView: currentViewImageUrl, nextView, hasRendered: !!renderedImageUrl, hasHarmonized: !!harmonizedImageUrl })
+                        setCurrentViewImageUrl(nextView)
+                      }}
+                      sx={{
+                        bgcolor: 'background.paper',
+                        border: '1px solid',
+                        borderColor: 'divider',
+                        boxShadow: '0 2px 8px rgba(0,0,0,0.15)',
+                        '&:hover': {
+                          bgcolor: 'action.hover',
+                          boxShadow: '0 4px 12px rgba(0,0,0,0.2)',
+                        },
+                        width: 36,
+                        height: 36,
+                      }}
+                    >
+                      <SwapHoriz fontSize="small" />
+                    </IconButton>
+                  </Tooltip>
                 </Box>
               )}
-          </Box>
-        )}
+            </Box>
+          )}
         </Box>
 
 
         {/* Floating top toolbar */}
-        <Box 
+        <Box
           ref={toolbarRef}
           data-floating-toolbar
           onMouseDown={handleToolbarMouseDown}
           onTouchStart={handleToolbarTouchStart}
-          sx={{ 
-            position: 'absolute', 
-            top: toolbarPosition.y, 
+          onPointerDown={handleToolbarPointerDown}
+          sx={{
+            position: 'absolute',
+            top: toolbarPosition.y,
             left: `${toolbarPosition.x}px`,
             transform: isDragging ? 'none' : 'translateY(-1px)',
-            bgcolor: 'background.paper', 
-            border: '1px solid', 
-            borderColor: 'divider', 
-            borderRadius: 999, 
-            boxShadow: '0 6px 18px rgba(0,0,0,0.08)', 
-            px: 1, 
-            py: 0.5, 
-            display: 'flex', 
-            alignItems: 'center', 
+            bgcolor: 'background.paper',
+            border: '1px solid',
+            borderColor: 'divider',
+            borderRadius: 999,
+            boxShadow: '0 6px 18px rgba(0,0,0,0.08)',
+            px: 1,
+            py: 0.5,
+            display: 'flex',
+            alignItems: 'center',
             gap: 0.5,
             cursor: isDragging ? 'grabbing' : 'grab',
             userSelect: 'none',
+            touchAction: 'none',  // Prevent browser handling of touch/pointer
             transition: isDragging ? 'none' : 'box-shadow 0.2s ease-out, transform 0.2s ease-out',
             '&:hover': {
               boxShadow: '0 8px 24px rgba(0,0,0,0.12)',
@@ -4004,8 +4295,8 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
           <Tooltip title="Undo (Cmd+Z / Ctrl+Z)"><span><IconButton size="small" onClick={(e) => { e.stopPropagation(); e.preventDefault(); console.log('Undo button clicked'); undo(); }} disabled={historyIndex <= 0}><Undo fontSize="small" /></IconButton></span></Tooltip>
           <Tooltip title="Redo (Cmd+Shift+Z / Ctrl+Y)"><span><IconButton size="small" onClick={(e) => { e.stopPropagation(); redo(); }} disabled={historyIndex >= history.length - 1}><Redo fontSize="small" /></IconButton></span></Tooltip>
           <Divider orientation="vertical" flexItem sx={{ mx: 0.5 }} />
-          <Tooltip title="Zoom Out"><span><IconButton 
-            size="small" 
+          <Tooltip title="Zoom Out"><span><IconButton
+            size="small"
             onClick={(e) => { e.stopPropagation(); setZoom(z => Math.max(minZoom, +(z - 0.1).toFixed(2))); }}
             sx={{
               minWidth: { xs: 44, md: 'auto' },
@@ -4015,8 +4306,8 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
             }}
           ><ZoomOut fontSize="small" /></IconButton></span></Tooltip>
           <Typography variant="caption" sx={{ minWidth: 40, textAlign: 'center' }}>{Math.round(zoom * 100)}%</Typography>
-          <Tooltip title="Zoom In"><span><IconButton 
-            size="small" 
+          <Tooltip title="Zoom In"><span><IconButton
+            size="small"
             onClick={(e) => { e.stopPropagation(); setZoom(z => Math.min(maxZoom, +(z + 0.1).toFixed(2))); }}
             sx={{
               minWidth: { xs: 44, md: 'auto' },
@@ -4033,16 +4324,16 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
           </ToggleButtonGroup>
           <Divider orientation="vertical" flexItem sx={{ mx: 0.5 }} />
           <Tooltip title="Brush Color"><span>
-            <IconButton 
-              size="small" 
+            <IconButton
+              size="small"
               onClick={(e) => e.stopPropagation()}
-              sx={{ 
-                width: { xs: 44, md: 32 }, 
-                height: { xs: 44, md: 32 }, 
+              sx={{
+                width: { xs: 44, md: 32 },
+                height: { xs: 44, md: 32 },
                 minWidth: { xs: 44, md: 32 },
                 minHeight: { xs: 44, md: 32 },
-                borderRadius: '50%', 
-                border: '2px solid', 
+                borderRadius: '50%',
+                border: '2px solid',
                 borderColor: 'divider',
                 bgcolor: color,
                 '&:hover': {
@@ -4069,13 +4360,13 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
             </IconButton>
           </span></Tooltip>
           <Divider orientation="vertical" flexItem sx={{ mx: 0.5 }} />
-          <Tooltip title="Select Area"><span><IconButton 
-            size="small" 
-            color="info" 
-            onClick={(e) => { e.stopPropagation(); startSelectionMode(); }} 
-            sx={{ 
-              bgcolor: selectionMode ? 'info.dark' : 'info.main', 
-              color: 'white', 
+          <Tooltip title="Select Area"><span><IconButton
+            size="small"
+            color="info"
+            onClick={(e) => { e.stopPropagation(); startSelectionMode(); }}
+            sx={{
+              bgcolor: selectionMode ? 'info.dark' : 'info.main',
+              color: 'white',
               '&:hover': { bgcolor: 'info.dark' },
               minWidth: { xs: 44, md: 'auto' },
               minHeight: { xs: 44, md: 'auto' },
@@ -4086,9 +4377,9 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
           {selectedImageId && !cropMode && !selectionMode && (
             <>
               <Divider orientation="vertical" flexItem sx={{ mx: 0.5 }} />
-              <Tooltip title="Replicate Image"><span><IconButton 
-                size="small" 
-                color="secondary" 
+              <Tooltip title="Replicate Image"><span><IconButton
+                size="small"
+                color="secondary"
                 onClick={(e) => { e.stopPropagation(); replicateSelectedImage(); }}
                 sx={{
                   minWidth: { xs: 44, md: 'auto' },
@@ -4097,9 +4388,9 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                   height: { xs: 44, md: 'auto' }
                 }}
               ><ContentCopy fontSize="small" /></IconButton></span></Tooltip>
-              <Tooltip title="Crop Image"><span><IconButton 
-                size="small" 
-                color="warning" 
+              <Tooltip title="Crop Image"><span><IconButton
+                size="small"
+                color="warning"
                 onClick={(e) => { e.stopPropagation(); cropSelectedImage(); }}
                 sx={{
                   minWidth: { xs: 44, md: 'auto' },
@@ -4113,13 +4404,13 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
           {cropMode && (
             <>
               <Divider orientation="vertical" flexItem sx={{ mx: 0.5 }} />
-              <Tooltip title="Apply Crop"><span><IconButton 
-                size="small" 
-                color="success" 
-                onClick={(e) => { e.stopPropagation(); applyCrop(); }} 
-                sx={{ 
-                  bgcolor: 'success.main', 
-                  color: 'white', 
+              <Tooltip title="Apply Crop"><span><IconButton
+                size="small"
+                color="success"
+                onClick={(e) => { e.stopPropagation(); applyCrop(); }}
+                sx={{
+                  bgcolor: 'success.main',
+                  color: 'white',
                   '&:hover': { bgcolor: 'success.dark' },
                   minWidth: { xs: 44, md: 'auto' },
                   minHeight: { xs: 44, md: 'auto' },
@@ -4127,13 +4418,13 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                   height: { xs: 44, md: 'auto' }
                 }}
               >✓</IconButton></span></Tooltip>
-              <Tooltip title="Cancel Crop"><span><IconButton 
-                size="small" 
-                color="error" 
-                onClick={(e) => { e.stopPropagation(); cancelCrop(); }} 
-                sx={{ 
-                  bgcolor: 'error.main', 
-                  color: 'white', 
+              <Tooltip title="Cancel Crop"><span><IconButton
+                size="small"
+                color="error"
+                onClick={(e) => { e.stopPropagation(); cancelCrop(); }}
+                sx={{
+                  bgcolor: 'error.main',
+                  color: 'white',
                   '&:hover': { bgcolor: 'error.dark' },
                   minWidth: { xs: 44, md: 'auto' },
                   minHeight: { xs: 44, md: 'auto' },
@@ -4146,13 +4437,13 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
           {selectionMode && (
             <>
               <Divider orientation="vertical" flexItem sx={{ mx: 0.5 }} />
-              <Tooltip title="Apply Selection"><span><IconButton 
-                size="small" 
-                color="success" 
-                onClick={(e) => { e.stopPropagation(); applySelection(); }} 
-                sx={{ 
-                  bgcolor: 'success.main', 
-                  color: 'white', 
+              <Tooltip title="Apply Selection"><span><IconButton
+                size="small"
+                color="success"
+                onClick={(e) => { e.stopPropagation(); applySelection(); }}
+                sx={{
+                  bgcolor: 'success.main',
+                  color: 'white',
                   '&:hover': { bgcolor: 'success.dark' },
                   minWidth: { xs: 44, md: 'auto' },
                   minHeight: { xs: 44, md: 'auto' },
@@ -4160,13 +4451,13 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                   height: { xs: 44, md: 'auto' }
                 }}
               >✓</IconButton></span></Tooltip>
-              <Tooltip title="Cancel Selection"><span><IconButton 
-                size="small" 
-                color="error" 
-                onClick={(e) => { e.stopPropagation(); cancelSelection(); }} 
-                sx={{ 
-                  bgcolor: 'error.main', 
-                  color: 'white', 
+              <Tooltip title="Cancel Selection"><span><IconButton
+                size="small"
+                color="error"
+                onClick={(e) => { e.stopPropagation(); cancelSelection(); }}
+                sx={{
+                  bgcolor: 'error.main',
+                  color: 'white',
                   '&:hover': { bgcolor: 'error.dark' },
                   minWidth: { xs: 44, md: 'auto' },
                   minHeight: { xs: 44, md: 'auto' },
@@ -4409,12 +4700,12 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                 },
               }}
             >
-              <Typography 
-                variant="body2" 
+              <Typography
+                variant="body2"
                 component="div"
-                sx={{ 
-                  color: 'white', 
-                  lineHeight: 1.6, 
+                sx={{
+                  color: 'white',
+                  lineHeight: 1.6,
                   fontSize: '0.85rem',
                   wordBreak: 'break-word',
                   whiteSpace: 'pre-wrap',
@@ -4429,10 +4720,10 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
       </Box>
 
       {/* Right Sidebar */}
-      <Box sx={{ 
-        display: { xs: 'none', sm: 'none', md: 'flex' }, 
-        flexDirection: 'column', 
-        borderLeft: '1px solid', 
+      <Box sx={{
+        display: { xs: 'none', sm: 'none', md: 'flex' },
+        flexDirection: 'column',
+        borderLeft: '1px solid',
         borderColor: 'divider',
         width: { md: '280px', lg: '300px' }
       }}>
@@ -4456,272 +4747,272 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
             <Box sx={{ p: 1.5, display: 'grid', gap: 1.25 }}>
               <Typography variant="subtitle2" sx={{ fontWeight: 'bold' }}>Jewellery Controls</Typography>
               <Box sx={{ position: 'relative', mb: 1 }}>
-              <ButtonGroup orientation="vertical" variant="outlined" sx={{ gap: 1, width: '100%' }}>
-                <Button
-                  variant="contained"
-                  onClick={handleGenerateClick}
-                  disabled={isAIProcessing}
-                  startIcon={isGenerateLoading ? <CircularProgress size={20} sx={{ color: '#ffffff' }} thickness={4} /> : <AutoFixHigh sx={{ fontSize: '1rem' }} />}
-                  sx={{
-                    background: isGenerateLoading 
-                      ? 'linear-gradient(135deg, #1a252f 0%, #000000 100%)'
-                      : 'linear-gradient(135deg, #2c3e50 0%, #000000 100%)',
-                    border: 'none',
-                    borderRadius: 3,
-                    textTransform: 'none',
-                    fontWeight: 600,
-                    fontSize: '0.875rem',
-                    py: 2,
-                    px: 2,
-                    boxShadow: isGenerateLoading 
-                      ? '0 8px 32px rgba(44, 62, 80, 0.6), 0 0 20px rgba(255, 255, 255, 0.2)'
-                      : '0 8px 32px rgba(0, 0, 0, 0.3)',
-                    position: 'relative',
-                    overflow: 'hidden',
-                    animation: isGenerateLoading ? 'pulse 2s ease-in-out infinite' : 'none',
-                    '@keyframes pulse': {
-                      '0%, 100%': {
-                        boxShadow: '0 8px 32px rgba(44, 62, 80, 0.6), 0 0 20px rgba(255, 255, 255, 0.2)',
-                      },
-                      '50%': {
-                        boxShadow: '0 8px 32px rgba(44, 62, 80, 0.8), 0 0 30px rgba(255, 255, 255, 0.4)',
-                      },
-                    },
-                    '&:hover': {
-                      background: isGenerateLoading 
+                <ButtonGroup orientation="vertical" variant="outlined" sx={{ gap: 1, width: '100%' }}>
+                  <Button
+                    variant="contained"
+                    onClick={handleGenerateClick}
+                    disabled={isAIProcessing}
+                    startIcon={isGenerateLoading ? <CircularProgress size={20} sx={{ color: '#ffffff' }} thickness={4} /> : <AutoFixHigh sx={{ fontSize: '1rem' }} />}
+                    sx={{
+                      background: isGenerateLoading
                         ? 'linear-gradient(135deg, #1a252f 0%, #000000 100%)'
-                        : 'linear-gradient(135deg, #1a252f 0%, #000000 100%)',
+                        : 'linear-gradient(135deg, #2c3e50 0%, #000000 100%)',
+                      border: 'none',
+                      borderRadius: 3,
+                      textTransform: 'none',
+                      fontWeight: 600,
+                      fontSize: '0.875rem',
+                      py: 2,
+                      px: 2,
                       boxShadow: isGenerateLoading
-                        ? '0 12px 40px rgba(44, 62, 80, 0.7), 0 0 25px rgba(255, 255, 255, 0.3)'
-                        : '0 12px 40px rgba(0, 0, 0, 0.4)',
-                      transform: isGenerateLoading ? 'none' : 'translateY(-2px)',
-                      transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
-                    },
-                    '&:active': {
-                      transform: 'translateY(0px)',
-                      boxShadow: '0 4px 20px rgba(0, 0, 0, 0.3)',
-                    },
-                    '&::before': {
-                      content: '""',
-                      position: 'absolute',
-                      top: 0,
-                      left: '-100%',
-                      width: '100%',
-                      height: '100%',
-                      background: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.2), transparent)',
-                      transition: 'left 0.5s',
-                    },
-                    '&:hover::before': {
-                      left: isGenerateLoading ? '-100%' : '100%',
-                    },
-                    '&.Mui-disabled': {
-                      opacity: 0.6,
-                      cursor: 'not-allowed'
-                    }
-                  }}
-                >
-                  {isGenerateLoading ? 'Generating...' : 'Generate Jewellery'}
-                </Button>
-                <Button
-                  onClick={handleHarmonizeClick}
-                  disabled={isAIProcessing}
-                  startIcon={isHarmonizeLoading ? <CircularProgress size={20} sx={{ color: theme.palette.mode === 'dark' ? '#ffffff' : '#1976d2' }} thickness={4} /> : <Settings sx={{ fontSize: '1rem' }} />}
-                  sx={{
-                    background: isHarmonizeLoading
-                      ? theme.palette.mode === 'dark'
-                        ? 'linear-gradient(135deg, rgba(255,255,255,0.2) 0%, rgba(255,255,255,0.1) 100%)'
-                        : 'linear-gradient(135deg, rgba(25, 118, 210, 0.15) 0%, rgba(25, 118, 210, 0.08) 100%)'
-                      : 'linear-gradient(135deg, rgba(255,255,255,0.1) 0%, rgba(255,255,255,0.05) 100%)',
-                    backdropFilter: 'blur(10px)',
-                    border: isHarmonizeLoading 
-                      ? theme.palette.mode === 'dark'
-                        ? '1px solid rgba(255,255,255,0.3)'
-                        : '2px solid rgba(25, 118, 210, 0.4)'
-                      : '1px solid rgba(0,0,0,0.1)',
-                    borderRadius: 3,
-                    textTransform: 'none',
-                    fontWeight: 600,
-                    fontSize: '0.875rem',
-                    py: 2,
-                    px: 2,
-                    color: 'text.primary',
-                    boxShadow: isHarmonizeLoading
-                      ? theme.palette.mode === 'dark'
-                        ? '0 8px 32px rgba(0,0,0,0.2), 0 0 20px rgba(255, 255, 255, 0.2)'
-                        : '0 8px 32px rgba(25, 118, 210, 0.3), 0 0 25px rgba(25, 118, 210, 0.4)'
-                      : '0 8px 32px rgba(0,0,0,0.1)',
-                    position: 'relative',
-                    overflow: 'hidden',
-                    animation: isHarmonizeLoading ? 'pulseHarmonize 2s ease-in-out infinite' : 'none',
-                    '@keyframes pulseHarmonize': {
-                      '0%, 100%': {
-                        boxShadow: theme.palette.mode === 'dark'
-                          ? '0 8px 32px rgba(0,0,0,0.2), 0 0 20px rgba(255, 255, 255, 0.2)'
-                          : '0 8px 32px rgba(25, 118, 210, 0.3), 0 0 25px rgba(25, 118, 210, 0.4)',
+                        ? '0 8px 32px rgba(44, 62, 80, 0.6), 0 0 20px rgba(255, 255, 255, 0.2)'
+                        : '0 8px 32px rgba(0, 0, 0, 0.3)',
+                      position: 'relative',
+                      overflow: 'hidden',
+                      animation: isGenerateLoading ? 'pulse 2s ease-in-out infinite' : 'none',
+                      '@keyframes pulse': {
+                        '0%, 100%': {
+                          boxShadow: '0 8px 32px rgba(44, 62, 80, 0.6), 0 0 20px rgba(255, 255, 255, 0.2)',
+                        },
+                        '50%': {
+                          boxShadow: '0 8px 32px rgba(44, 62, 80, 0.8), 0 0 30px rgba(255, 255, 255, 0.4)',
+                        },
                       },
-                      '50%': {
-                        boxShadow: theme.palette.mode === 'dark'
-                          ? '0 8px 32px rgba(0,0,0,0.3), 0 0 30px rgba(255, 255, 255, 0.4)'
-                          : '0 8px 32px rgba(25, 118, 210, 0.5), 0 0 35px rgba(25, 118, 210, 0.6)',
+                      '&:hover': {
+                        background: isGenerateLoading
+                          ? 'linear-gradient(135deg, #1a252f 0%, #000000 100%)'
+                          : 'linear-gradient(135deg, #1a252f 0%, #000000 100%)',
+                        boxShadow: isGenerateLoading
+                          ? '0 12px 40px rgba(44, 62, 80, 0.7), 0 0 25px rgba(255, 255, 255, 0.3)'
+                          : '0 12px 40px rgba(0, 0, 0, 0.4)',
+                        transform: isGenerateLoading ? 'none' : 'translateY(-2px)',
+                        transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
                       },
-                    },
-                    '&:hover': {
+                      '&:active': {
+                        transform: 'translateY(0px)',
+                        boxShadow: '0 4px 20px rgba(0, 0, 0, 0.3)',
+                      },
+                      '&::before': {
+                        content: '""',
+                        position: 'absolute',
+                        top: 0,
+                        left: '-100%',
+                        width: '100%',
+                        height: '100%',
+                        background: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.2), transparent)',
+                        transition: 'left 0.5s',
+                      },
+                      '&:hover::before': {
+                        left: isGenerateLoading ? '-100%' : '100%',
+                      },
+                      '&.Mui-disabled': {
+                        opacity: 0.6,
+                        cursor: 'not-allowed'
+                      }
+                    }}
+                  >
+                    {isGenerateLoading ? 'Generating...' : 'Generate Jewellery'}
+                  </Button>
+                  <Button
+                    onClick={handleHarmonizeClick}
+                    disabled={isAIProcessing}
+                    startIcon={isHarmonizeLoading ? <CircularProgress size={20} sx={{ color: theme.palette.mode === 'dark' ? '#ffffff' : '#1976d2' }} thickness={4} /> : <Settings sx={{ fontSize: '1rem' }} />}
+                    sx={{
                       background: isHarmonizeLoading
                         ? theme.palette.mode === 'dark'
                           ? 'linear-gradient(135deg, rgba(255,255,255,0.2) 0%, rgba(255,255,255,0.1) 100%)'
                           : 'linear-gradient(135deg, rgba(25, 118, 210, 0.15) 0%, rgba(25, 118, 210, 0.08) 100%)'
-                        : 'linear-gradient(135deg, rgba(255,255,255,0.2) 0%, rgba(255,255,255,0.1) 100%)',
+                        : 'linear-gradient(135deg, rgba(255,255,255,0.1) 0%, rgba(255,255,255,0.05) 100%)',
+                      backdropFilter: 'blur(10px)',
                       border: isHarmonizeLoading
                         ? theme.palette.mode === 'dark'
                           ? '1px solid rgba(255,255,255,0.3)'
-                          : '2px solid rgba(25, 118, 210, 0.5)'
-                        : '1px solid rgba(0,0,0,0.15)',
+                          : '2px solid rgba(25, 118, 210, 0.4)'
+                        : '1px solid rgba(0,0,0,0.1)',
+                      borderRadius: 3,
+                      textTransform: 'none',
+                      fontWeight: 600,
+                      fontSize: '0.875rem',
+                      py: 2,
+                      px: 2,
+                      color: 'text.primary',
                       boxShadow: isHarmonizeLoading
                         ? theme.palette.mode === 'dark'
-                          ? '0 12px 40px rgba(0,0,0,0.25), 0 0 25px rgba(255, 255, 255, 0.3)'
-                          : '0 12px 40px rgba(25, 118, 210, 0.4), 0 0 30px rgba(25, 118, 210, 0.5)'
-                        : '0 12px 40px rgba(0,0,0,0.15)',
-                      transform: isHarmonizeLoading ? 'none' : 'translateY(-2px)',
-                      transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
-                    },
-                    '&:active': {
-                      transform: 'translateY(0px)',
-                      boxShadow: '0 4px 20px rgba(0,0,0,0.1)',
-                    },
-                    '&::before': {
-                      content: '""',
-                      position: 'absolute',
-                      top: 0,
-                      left: '-100%',
-                      width: '100%',
-                      height: '100%',
-                      background: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.1), transparent)',
-                      transition: 'left 0.5s',
-                    },
-                    '&:hover::before': {
-                      left: isHarmonizeLoading ? '-100%' : '100%',
-                    },
-                    '&.Mui-disabled': {
-                      opacity: 0.6,
-                      cursor: 'not-allowed'
+                          ? '0 8px 32px rgba(0,0,0,0.2), 0 0 20px rgba(255, 255, 255, 0.2)'
+                          : '0 8px 32px rgba(25, 118, 210, 0.3), 0 0 25px rgba(25, 118, 210, 0.4)'
+                        : '0 8px 32px rgba(0,0,0,0.1)',
+                      position: 'relative',
+                      overflow: 'hidden',
+                      animation: isHarmonizeLoading ? 'pulseHarmonize 2s ease-in-out infinite' : 'none',
+                      '@keyframes pulseHarmonize': {
+                        '0%, 100%': {
+                          boxShadow: theme.palette.mode === 'dark'
+                            ? '0 8px 32px rgba(0,0,0,0.2), 0 0 20px rgba(255, 255, 255, 0.2)'
+                            : '0 8px 32px rgba(25, 118, 210, 0.3), 0 0 25px rgba(25, 118, 210, 0.4)',
+                        },
+                        '50%': {
+                          boxShadow: theme.palette.mode === 'dark'
+                            ? '0 8px 32px rgba(0,0,0,0.3), 0 0 30px rgba(255, 255, 255, 0.4)'
+                            : '0 8px 32px rgba(25, 118, 210, 0.5), 0 0 35px rgba(25, 118, 210, 0.6)',
+                        },
+                      },
+                      '&:hover': {
+                        background: isHarmonizeLoading
+                          ? theme.palette.mode === 'dark'
+                            ? 'linear-gradient(135deg, rgba(255,255,255,0.2) 0%, rgba(255,255,255,0.1) 100%)'
+                            : 'linear-gradient(135deg, rgba(25, 118, 210, 0.15) 0%, rgba(25, 118, 210, 0.08) 100%)'
+                          : 'linear-gradient(135deg, rgba(255,255,255,0.2) 0%, rgba(255,255,255,0.1) 100%)',
+                        border: isHarmonizeLoading
+                          ? theme.palette.mode === 'dark'
+                            ? '1px solid rgba(255,255,255,0.3)'
+                            : '2px solid rgba(25, 118, 210, 0.5)'
+                          : '1px solid rgba(0,0,0,0.15)',
+                        boxShadow: isHarmonizeLoading
+                          ? theme.palette.mode === 'dark'
+                            ? '0 12px 40px rgba(0,0,0,0.25), 0 0 25px rgba(255, 255, 255, 0.3)'
+                            : '0 12px 40px rgba(25, 118, 210, 0.4), 0 0 30px rgba(25, 118, 210, 0.5)'
+                          : '0 12px 40px rgba(0,0,0,0.15)',
+                        transform: isHarmonizeLoading ? 'none' : 'translateY(-2px)',
+                        transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+                      },
+                      '&:active': {
+                        transform: 'translateY(0px)',
+                        boxShadow: '0 4px 20px rgba(0,0,0,0.1)',
+                      },
+                      '&::before': {
+                        content: '""',
+                        position: 'absolute',
+                        top: 0,
+                        left: '-100%',
+                        width: '100%',
+                        height: '100%',
+                        background: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.1), transparent)',
+                        transition: 'left 0.5s',
+                      },
+                      '&:hover::before': {
+                        left: isHarmonizeLoading ? '-100%' : '100%',
+                      },
+                      '&.Mui-disabled': {
+                        opacity: 0.6,
+                        cursor: 'not-allowed'
+                      }
+                    }}
+                  >
+                    {isHarmonizeLoading ? 'Harmonizing...' : 'Harmonize'}
+                  </Button>
+                </ButtonGroup>
+                {generationError && (
+                  <Typography variant="caption" color="error" sx={{ mt: 1, fontWeight: 600 }}>
+                    {generationError}
+                  </Typography>
+                )}
+                {generationError && (
+                  <Typography variant="caption" color="error" sx={{ mt: 1, fontWeight: 600 }}>
+                    {generationError}
+                  </Typography>
+                )}
+                <IconButton
+                  onClick={(e) => setJewelleryStyleAnchor(e.currentTarget)}
+                  sx={{
+                    width: 32,
+                    height: 32,
+                    border: '1.5px solid',
+                    borderColor: 'rgba(0,0,0,0.12)',
+                    borderRadius: 1.5,
+                    color: 'text.secondary',
+                    background: 'linear-gradient(135deg, rgba(255,255,255,0.8) 0%, rgba(255,255,255,0.6) 100%)',
+                    backdropFilter: 'blur(8px)',
+                    boxShadow: '0 1px 3px rgba(0,0,0,0.08)',
+                    position: 'absolute',
+                    top: '25%',
+                    right: 8,
+                    transform: 'translateY(-50%)',
+                    zIndex: 1002,
+                    pointerEvents: 'auto',
+                    transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+                    '&:hover': {
+                      borderColor: 'primary.main',
+                      bgcolor: 'linear-gradient(135deg, rgba(25, 118, 210, 0.04) 0%, rgba(25, 118, 210, 0.02) 100%)',
+                      boxShadow: '0 4px 12px rgba(25, 118, 210, 0.2)',
+                      transform: 'translateY(calc(-50% - 1px))',
                     }
                   }}
                 >
-                  {isHarmonizeLoading ? 'Harmonizing...' : 'Harmonize'}
-                </Button>
-              </ButtonGroup>
-              {generationError && (
-                <Typography variant="caption" color="error" sx={{ mt: 1, fontWeight: 600 }}>
-                  {generationError}
-                </Typography>
-              )}
-            {generationError && (
-              <Typography variant="caption" color="error" sx={{ mt: 1, fontWeight: 600 }}>
-                {generationError}
-              </Typography>
-            )}
-              <IconButton
-                onClick={(e) => setJewelleryStyleAnchor(e.currentTarget)}
-                sx={{
-                  width: 32,
-                  height: 32,
-                  border: '1.5px solid',
-                  borderColor: 'rgba(0,0,0,0.12)',
-                  borderRadius: 1.5,
-                  color: 'text.secondary',
-                  background: 'linear-gradient(135deg, rgba(255,255,255,0.8) 0%, rgba(255,255,255,0.6) 100%)',
-                  backdropFilter: 'blur(8px)',
-                  boxShadow: '0 1px 3px rgba(0,0,0,0.08)',
-                  position: 'absolute',
-                  top: '25%',
-                  right: 8,
-                  transform: 'translateY(-50%)',
-                  zIndex: 1002,
-                  pointerEvents: 'auto',
-                  transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
-                  '&:hover': {
-                    borderColor: 'primary.main',
-                    bgcolor: 'linear-gradient(135deg, rgba(25, 118, 210, 0.04) 0%, rgba(25, 118, 210, 0.02) 100%)',
-                    boxShadow: '0 4px 12px rgba(25, 118, 210, 0.2)',
-                    transform: 'translateY(calc(-50% - 1px))',
-                  }
-                }}
-              >
-                <DesignServices sx={{ fontSize: '1rem' }} />
-              </IconButton>
-              <IconButton
-                onClick={(e) => setHarmonizeOptionsAnchor(e.currentTarget)}
-                sx={{
-                  width: 32,
-                  height: 32,
-                  border: '1.5px solid',
-                  borderColor: 'rgba(0,0,0,0.12)',
-                  borderRadius: 1.5,
-                  color: 'text.secondary',
-                  background: 'linear-gradient(135deg, rgba(255,255,255,0.8) 0%, rgba(255,255,255,0.6) 100%)',
-                  backdropFilter: 'blur(8px)',
-                  boxShadow: '0 1px 3px rgba(0,0,0,0.08)',
-                  position: 'absolute',
-                  top: '75%',
-                  right: 8,
-                  transform: 'translateY(-50%)',
-                  zIndex: 1002,
-                  pointerEvents: 'auto',
-                  transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
-                  '&:hover': {
-                    borderColor: 'primary.main',
-                    bgcolor: 'linear-gradient(135deg, rgba(25, 118, 210, 0.04) 0%, rgba(25, 118, 210, 0.02) 100%)',
-                    boxShadow: '0 4px 12px rgba(25, 118, 210, 0.2)',
-                    transform: 'translateY(calc(-50% - 1px))',
-                  }
-                }}
-              >
-                <SettingsSuggest sx={{ fontSize: '1rem' }} />
-              </IconButton>
-              {/* Style menu */}
-              <Menu
-                anchorEl={jewelleryStyleAnchor}
-                open={Boolean(jewelleryStyleAnchor)}
-                onClose={() => setJewelleryStyleAnchor(null)}
-                PaperProps={{ sx: { mt: 0.5, minWidth: 160, borderRadius: 1, p: 0 } }}
-              >
-                {[
-                  'Temple Jewellery',
-                  'Antique Jewellery',
-                  'Victorian Jewellery',
-                  'Jadau Jewellery',
-                  'Kundan Meenakari',
-                  'Polki Open Setting',
-                ].map((opt) => (
-                  <MenuItem key={opt} dense sx={{ py: 0.5, px: 1.25, fontSize: '0.82rem' }} onClick={() => { setSelectedJewelleryStyle(opt); setJewelleryStyleAnchor(null) }}>
-                    {opt}
-                  </MenuItem>
-                ))}
-              </Menu>
-              {/* Harmonize Options menu */}
-              <Menu
-                anchorEl={harmonizeOptionsAnchor}
-                open={Boolean(harmonizeOptionsAnchor)}
-                onClose={() => setHarmonizeOptionsAnchor(null)}
-                PaperProps={{ sx: { mt: 0.5, minWidth: 160, borderRadius: 1, p: 0 } }}
-              >
-                  {['Ring', 'Earring', 'Necklace', 'Bracelet', 'Bangles', 'Pendant'].map((opt) => {
-                  const checked = selectedHarmonizeOptions.includes(opt)
-                  return (
-                    <MenuItem
-                      key={opt}
-                      dense
-                      sx={{ py: 0.5, px: 1.25, fontSize: '0.82rem' }}
-                      onClick={() => {
-                        setSelectedHarmonizeOptions((prev) => checked ? prev.filter(o => o !== opt) : [...prev, opt])
-                      }}
-                    >
-                      <Checkbox checked={checked} size="small" sx={{ mr: 1 }} />
+                  <DesignServices sx={{ fontSize: '1rem' }} />
+                </IconButton>
+                <IconButton
+                  onClick={(e) => setHarmonizeOptionsAnchor(e.currentTarget)}
+                  sx={{
+                    width: 32,
+                    height: 32,
+                    border: '1.5px solid',
+                    borderColor: 'rgba(0,0,0,0.12)',
+                    borderRadius: 1.5,
+                    color: 'text.secondary',
+                    background: 'linear-gradient(135deg, rgba(255,255,255,0.8) 0%, rgba(255,255,255,0.6) 100%)',
+                    backdropFilter: 'blur(8px)',
+                    boxShadow: '0 1px 3px rgba(0,0,0,0.08)',
+                    position: 'absolute',
+                    top: '75%',
+                    right: 8,
+                    transform: 'translateY(-50%)',
+                    zIndex: 1002,
+                    pointerEvents: 'auto',
+                    transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+                    '&:hover': {
+                      borderColor: 'primary.main',
+                      bgcolor: 'linear-gradient(135deg, rgba(25, 118, 210, 0.04) 0%, rgba(25, 118, 210, 0.02) 100%)',
+                      boxShadow: '0 4px 12px rgba(25, 118, 210, 0.2)',
+                      transform: 'translateY(calc(-50% - 1px))',
+                    }
+                  }}
+                >
+                  <SettingsSuggest sx={{ fontSize: '1rem' }} />
+                </IconButton>
+                {/* Style menu */}
+                <Menu
+                  anchorEl={jewelleryStyleAnchor}
+                  open={Boolean(jewelleryStyleAnchor)}
+                  onClose={() => setJewelleryStyleAnchor(null)}
+                  PaperProps={{ sx: { mt: 0.5, minWidth: 160, borderRadius: 1, p: 0 } }}
+                >
+                  {[
+                    'Temple Jewellery',
+                    'Antique Jewellery',
+                    'Victorian Jewellery',
+                    'Jadau Jewellery',
+                    'Kundan Meenakari',
+                    'Polki Open Setting',
+                  ].map((opt) => (
+                    <MenuItem key={opt} dense sx={{ py: 0.5, px: 1.25, fontSize: '0.82rem' }} onClick={() => { setSelectedJewelleryStyle(opt); setJewelleryStyleAnchor(null) }}>
                       {opt}
                     </MenuItem>
-                  )
-                })}
-              </Menu>
+                  ))}
+                </Menu>
+                {/* Harmonize Options menu */}
+                <Menu
+                  anchorEl={harmonizeOptionsAnchor}
+                  open={Boolean(harmonizeOptionsAnchor)}
+                  onClose={() => setHarmonizeOptionsAnchor(null)}
+                  PaperProps={{ sx: { mt: 0.5, minWidth: 160, borderRadius: 1, p: 0 } }}
+                >
+                  {['Ring', 'Earring', 'Necklace', 'Bracelet', 'Bangles', 'Pendant'].map((opt) => {
+                    const checked = selectedHarmonizeOptions.includes(opt)
+                    return (
+                      <MenuItem
+                        key={opt}
+                        dense
+                        sx={{ py: 0.5, px: 1.25, fontSize: '0.82rem' }}
+                        onClick={() => {
+                          setSelectedHarmonizeOptions((prev) => checked ? prev.filter(o => o !== opt) : [...prev, opt])
+                        }}
+                      >
+                        <Checkbox checked={checked} size="small" sx={{ mr: 1 }} />
+                        {opt}
+                      </MenuItem>
+                    )
+                  })}
+                </Menu>
               </Box>
             </Box>
             <Divider />
@@ -4743,7 +5034,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
               </Box>
               <Divider sx={{ my: 1 }} />
               <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
-                <Button 
+                <Button
                   component="label"
                   variant="contained"
                   startIcon={
@@ -4779,27 +5070,27 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                     transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
                     ...(theme.palette.mode === 'dark'
                       ? {
-                          backgroundColor: '#000',
-                          color: '#fff',
-                          border: '1px solid rgba(255,255,255,0.2)',
-                          boxShadow: '0 4px 16px rgba(0,0,0,0.6)',
-                          '&:hover': {
-                            backgroundColor: '#111',
-                            boxShadow: '0 6px 20px rgba(0,0,0,0.7)'
-                          }
+                        backgroundColor: '#000',
+                        color: '#fff',
+                        border: '1px solid rgba(255,255,255,0.2)',
+                        boxShadow: '0 4px 16px rgba(0,0,0,0.6)',
+                        '&:hover': {
+                          backgroundColor: '#111',
+                          boxShadow: '0 6px 20px rgba(0,0,0,0.7)'
                         }
+                      }
                       : {
-                          background: 'linear-gradient(135deg, #ffffff 0%, #f8f8f8 100%)',
-                          border: '1px solid rgba(0,0,0,0.1)',
-                          color: 'text.primary',
-                          boxShadow: '0 4px 16px rgba(0,0,0,0.08), 0 1px 4px rgba(0,0,0,0.05)',
-                          '&:hover': {
-                            background: 'linear-gradient(135deg, #f8f8f8 0%, #f0f0f0 100%)',
-                            boxShadow: '0 6px 20px rgba(0,0,0,0.12), 0 2px 6px rgba(0,0,0,0.08)',
-                            transform: 'translateY(-1px)',
-                            border: '1px solid rgba(0,0,0,0.15)',
-                          },
-                        }),
+                        background: 'linear-gradient(135deg, #ffffff 0%, #f8f8f8 100%)',
+                        border: '1px solid rgba(0,0,0,0.1)',
+                        color: 'text.primary',
+                        boxShadow: '0 4px 16px rgba(0,0,0,0.08), 0 1px 4px rgba(0,0,0,0.05)',
+                        '&:hover': {
+                          background: 'linear-gradient(135deg, #f8f8f8 0%, #f0f0f0 100%)',
+                          boxShadow: '0 6px 20px rgba(0,0,0,0.12), 0 2px 6px rgba(0,0,0,0.08)',
+                          transform: 'translateY(-1px)',
+                          border: '1px solid rgba(0,0,0,0.15)',
+                        },
+                      }),
                     '&:active': {
                       transform: 'translateY(0px)'
                     },
@@ -4922,44 +5213,44 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                     overflow: 'hidden',
                     ...(theme.palette.mode === 'dark'
                       ? {
-                          backgroundColor: contextText.trim() ? '#000' : '#333',
-                          color: contextText.trim() ? '#fff' : '#666',
-                          border: '1px solid rgba(255,255,255,0.2)',
-                          boxShadow: contextText.trim() ? '0 4px 16px rgba(0,0,0,0.6)' : '0 2px 8px rgba(0,0,0,0.3)',
-                          '&:hover': {
-                            backgroundColor: contextText.trim() ? '#111' : '#333',
-                            boxShadow: contextText.trim() ? '0 6px 20px rgba(0,0,0,0.7)' : '0 2px 8px rgba(0,0,0,0.3)'
-                          },
-                          '&:disabled': {
-                            backgroundColor: '#333',
-                            color: '#666',
-                            border: '1px solid rgba(255,255,255,0.1)'
-                          }
+                        backgroundColor: contextText.trim() ? '#000' : '#333',
+                        color: contextText.trim() ? '#fff' : '#666',
+                        border: '1px solid rgba(255,255,255,0.2)',
+                        boxShadow: contextText.trim() ? '0 4px 16px rgba(0,0,0,0.6)' : '0 2px 8px rgba(0,0,0,0.3)',
+                        '&:hover': {
+                          backgroundColor: contextText.trim() ? '#111' : '#333',
+                          boxShadow: contextText.trim() ? '0 6px 20px rgba(0,0,0,0.7)' : '0 2px 8px rgba(0,0,0,0.3)'
+                        },
+                        '&:disabled': {
+                          backgroundColor: '#333',
+                          color: '#666',
+                          border: '1px solid rgba(255,255,255,0.1)'
                         }
+                      }
                       : {
-                          background: contextText.trim() 
-                            ? 'linear-gradient(135deg, #ffffff 0%, #f8f8f8 100%)'
+                        background: contextText.trim()
+                          ? 'linear-gradient(135deg, #ffffff 0%, #f8f8f8 100%)'
+                          : 'linear-gradient(135deg, #f5f5f5 0%, #e8e8e8 100%)',
+                        border: '1px solid rgba(0,0,0,0.1)',
+                        color: contextText.trim() ? 'text.primary' : 'text.disabled',
+                        boxShadow: contextText.trim()
+                          ? '0 4px 16px rgba(0,0,0,0.08), 0 1px 4px rgba(0,0,0,0.05)'
+                          : '0 2px 8px rgba(0,0,0,0.04)',
+                        '&:hover': {
+                          background: contextText.trim()
+                            ? 'linear-gradient(135deg, #f8f8f8 0%, #f0f0f0 100%)'
                             : 'linear-gradient(135deg, #f5f5f5 0%, #e8e8e8 100%)',
-                          border: '1px solid rgba(0,0,0,0.1)',
-                          color: contextText.trim() ? 'text.primary' : 'text.disabled',
-                          boxShadow: contextText.trim() 
-                            ? '0 4px 16px rgba(0,0,0,0.08), 0 1px 4px rgba(0,0,0,0.05)'
+                          boxShadow: contextText.trim()
+                            ? '0 6px 20px rgba(0,0,0,0.12), 0 2px 6px rgba(0,0,0,0.08)'
                             : '0 2px 8px rgba(0,0,0,0.04)',
-                          '&:hover': {
-                            background: contextText.trim() 
-                              ? 'linear-gradient(135deg, #f8f8f8 0%, #f0f0f0 100%)'
-                              : 'linear-gradient(135deg, #f5f5f5 0%, #e8e8e8 100%)',
-                            boxShadow: contextText.trim() 
-                              ? '0 6px 20px rgba(0,0,0,0.12), 0 2px 6px rgba(0,0,0,0.08)'
-                              : '0 2px 8px rgba(0,0,0,0.04)',
-                            transform: contextText.trim() ? 'translateY(-1px)' : 'none',
-                            border: '1px solid rgba(0,0,0,0.15)',
-                          },
-                          '&:disabled': {
-                            background: 'linear-gradient(135deg, #f5f5f5 0%, #e8e8e8 100%)',
-                            color: 'text.disabled'
-                          }
-                        }),
+                          transform: contextText.trim() ? 'translateY(-1px)' : 'none',
+                          border: '1px solid rgba(0,0,0,0.15)',
+                        },
+                        '&:disabled': {
+                          background: 'linear-gradient(135deg, #f5f5f5 0%, #e8e8e8 100%)',
+                          color: 'text.disabled'
+                        }
+                      }),
                     '&:active': {
                       transform: contextText.trim() ? 'translateY(0px)' : 'none'
                     },
@@ -4998,7 +5289,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                 </Button>
               </Box>
             </Box>
-            
+
             {/* Motif Controls */}
             {selectedMotifId && (
               <Box sx={{ p: 1.5, display: 'grid', gap: 1 }}>
@@ -5051,15 +5342,15 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
           <Box sx={{ flex: 1, overflowY: 'auto' }}>
             <Box sx={{ p: 1.5, display: 'grid', gap: 1.25 }}>
               <Typography variant="subtitle2" sx={{ fontWeight: 'bold' }}>Motif Library</Typography>
-              
-              
+
+
               {/* Create Motif Button */}
               <Button
                 variant="contained"
                 onClick={startCreatingMotif}
                 disabled={isCreatingMotif}
                 sx={{
-                  background: isCreatingMotif 
+                  background: isCreatingMotif
                     ? 'linear-gradient(135deg, rgba(255,255,255,0.1) 0%, rgba(255,255,255,0.05) 100%)'
                     : 'linear-gradient(135deg, #0a0a2e 0%, #16213e 50%, #000000 100%)',
                   backdropFilter: 'blur(10px)',
@@ -5074,7 +5365,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                   position: 'relative',
                   overflow: 'hidden',
                   '&:hover': {
-                    background: isCreatingMotif 
+                    background: isCreatingMotif
                       ? 'linear-gradient(135deg, rgba(255,255,255,0.1) 0%, rgba(255,255,255,0.05) 100%)'
                       : 'linear-gradient(135deg, #0f0f3a 0%, #1a2a4a 50%, #111111 100%)',
                     border: '1px solid rgba(0,0,0,0.15)',
@@ -5179,13 +5470,13 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                 <Typography variant="subtitle2" sx={{ fontWeight: 'bold', mb: 1 }}>
                   Your Motifs ({motifs.length})
                 </Typography>
-                
+
                 {motifs.length === 0 ? (
-                  <Box sx={{ 
-                    textAlign: 'center', 
-                    py: 3, 
-                    border: '2px dashed', 
-                    borderColor: 'divider', 
+                  <Box sx={{
+                    textAlign: 'center',
+                    py: 3,
+                    border: '2px dashed',
+                    borderColor: 'divider',
                     borderRadius: 2,
                     backgroundColor: 'action.hover'
                   }}>
@@ -5197,10 +5488,10 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                     </Typography>
                   </Box>
                 ) : (
-                  <Box sx={{ 
-                    display: 'grid', 
-                    gridTemplateColumns: 'repeat(auto-fill, minmax(80px, 1fr))', 
-                    gap: 1 
+                  <Box sx={{
+                    display: 'grid',
+                    gridTemplateColumns: 'repeat(auto-fill, minmax(80px, 1fr))',
+                    gap: 1
                   }}>
                     {motifs.map((motif) => (
                       <Box
@@ -5273,14 +5564,14 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                 <Typography variant="caption" sx={{ color: 'text.secondary', mb: 1 }}>
                   These images will be sent to the AI as style reference when you generate or harmonize.
                 </Typography>
-                
+
                 <Button
                   component="label"
                   variant="contained"
                   disabled={signatureStyles.length >= 4}
                   sx={{
                     width: '100%',
-                    background: signatureStyles.length >= 4 
+                    background: signatureStyles.length >= 4
                       ? 'linear-gradient(135deg, rgba(255,255,255,0.1) 0%, rgba(255,255,255,0.05) 100%)'
                       : 'linear-gradient(135deg, rgba(255,255,255,0.1) 0%, rgba(255,255,255,0.05) 100%)',
                     backdropFilter: 'blur(10px)',
@@ -5295,7 +5586,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                     position: 'relative',
                     overflow: 'hidden',
                     '&:hover': {
-                      background: signatureStyles.length >= 4 
+                      background: signatureStyles.length >= 4
                         ? 'linear-gradient(135deg, rgba(255,255,255,0.1) 0%, rgba(255,255,255,0.05) 100%)'
                         : 'linear-gradient(135deg, rgba(255,255,255,0.2) 0%, rgba(255,255,255,0.1) 100%)',
                       border: '1px solid rgba(0,0,0,0.15)',
@@ -5342,9 +5633,9 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
 
                 {/* Signature Style Gallery */}
                 {signatureStyles.length > 0 && (
-                  <Box sx={{ 
-                    display: 'grid', 
-                    gridTemplateColumns: 'repeat(auto-fill, minmax(60px, 1fr))', 
+                  <Box sx={{
+                    display: 'grid',
+                    gridTemplateColumns: 'repeat(auto-fill, minmax(60px, 1fr))',
                     gap: 1,
                     mt: 1
                   }}>
@@ -5410,15 +5701,15 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                   </Box>
                 )}
               </Box>
-              
+
               {/* Divider */}
               <Divider sx={{ my: 2 }} />
-              
+
               {/* Content Builder Section */}
               <Typography variant="subtitle2" sx={{ fontWeight: 'bold', mb: 1 }}>
                 Content Builder
               </Typography>
-              
+
               {/* Style and Region Dropdowns */}
               <Box sx={{ display: 'flex', gap: 1, mb: 2 }}>
                 <Button
@@ -5462,7 +5753,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                   Region: {selectedRegion}
                 </Button>
               </Box>
-              
+
               {/* Content Details Text Field */}
               <TextField
                 multiline
@@ -5487,7 +5778,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                   }
                 })}
               />
-              
+
               {/* Generate Content Button */}
               <Button
                 variant="contained"
@@ -5501,9 +5792,9 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                 }}
                 disabled={!contentDetails.trim()}
                 sx={{
-                  background: contentDetails.trim() 
+                  background: contentDetails.trim()
                     ? 'linear-gradient(135deg, #2c3e50 0%, #000000 100%)'
-                    : theme.palette.mode === 'dark' 
+                    : theme.palette.mode === 'dark'
                       ? 'linear-gradient(135deg, #424242 0%, #616161 100%)'
                       : 'linear-gradient(135deg, #e0e0e0 0%, #bdbdbd 100%)',
                   border: 'none',
@@ -5512,19 +5803,19 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                   fontWeight: 600,
                   fontSize: '0.875rem',
                   py: 1.5,
-                  boxShadow: contentDetails.trim() 
+                  boxShadow: contentDetails.trim()
                     ? '0 8px 32px rgba(0, 0, 0, 0.3)'
                     : '0 4px 16px rgba(0, 0, 0, 0.1)',
                   position: 'relative',
                   overflow: 'hidden',
                   color: contentDetails.trim() ? 'white' : theme.palette.mode === 'dark' ? 'white' : 'text.secondary',
                   '&:hover': {
-                    background: contentDetails.trim() 
+                    background: contentDetails.trim()
                       ? 'linear-gradient(135deg, #1a252f 0%, #000000 100%)'
-                      : theme.palette.mode === 'dark' 
+                      : theme.palette.mode === 'dark'
                         ? 'linear-gradient(135deg, #525252 0%, #757575 100%)'
                         : 'linear-gradient(135deg, #e0e0e0 0%, #bdbdbd 100%)',
-                    boxShadow: contentDetails.trim() 
+                    boxShadow: contentDetails.trim()
                       ? '0 12px 40px rgba(0, 0, 0, 0.4)'
                       : '0 4px 16px rgba(0, 0, 0, 0.1)',
                     transform: contentDetails.trim() ? 'translateY(-2px)' : 'none',
@@ -5532,7 +5823,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                   },
                   '&:active': {
                     transform: contentDetails.trim() ? 'translateY(0px)' : 'none',
-                    boxShadow: contentDetails.trim() 
+                    boxShadow: contentDetails.trim()
                       ? '0 4px 20px rgba(0, 0, 0, 0.2)'
                       : '0 4px 16px rgba(0, 0, 0, 0.1)',
                   },
@@ -5583,13 +5874,13 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
 
         <Menu anchorEl={stoneAnchor} open={Boolean(stoneAnchor)} onClose={() => setStoneAnchor(null)}>
           {STONES.map(s => (
-            <MenuItem 
-              key={s.key} 
-              onClick={() => { 
+            <MenuItem
+              key={s.key}
+              onClick={() => {
                 if (s.hasSubmenu) {
                   setSapphireSubmenuAnchor(stoneAnchor)
                 } else {
-                  stoneType === 'primary' ? setPrimaryStone(s.key) : setSecondaryStone(s.key); 
+                  stoneType === 'primary' ? setPrimaryStone(s.key) : setSecondaryStone(s.key);
                   setStoneAnchor(null)
                 }
               }}
@@ -5600,18 +5891,18 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
           ))}
         </Menu>
 
-        <Menu 
-          anchorEl={sapphireSubmenuAnchor} 
-          open={Boolean(sapphireSubmenuAnchor)} 
+        <Menu
+          anchorEl={sapphireSubmenuAnchor}
+          open={Boolean(sapphireSubmenuAnchor)}
           onClose={() => setSapphireSubmenuAnchor(null)}
           anchorOrigin={{ vertical: 'top', horizontal: 'right' }}
           transformOrigin={{ vertical: 'top', horizontal: 'left' }}
         >
           {SAPPHIRE_VARIANTS.map(s => (
-            <MenuItem 
-              key={s.key} 
-              onClick={() => { 
-                stoneType === 'primary' ? setPrimaryStone(s.key) : setSecondaryStone(s.key); 
+            <MenuItem
+              key={s.key}
+              onClick={() => {
+                stoneType === 'primary' ? setPrimaryStone(s.key) : setSecondaryStone(s.key);
                 setSapphireSubmenuAnchor(null)
                 setStoneAnchor(null)
               }}
@@ -5647,17 +5938,17 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
       </Box>
 
       {/* Mobile Left Drawer */}
-      <Drawer 
-        anchor="left" 
-        open={leftDrawerOpen} 
+      <Drawer
+        anchor="left"
+        open={leftDrawerOpen}
         onClose={() => setLeftDrawerOpen(false)}
         sx={{ display: { xs: 'block', sm: 'block', md: 'none' } }}
       >
-        <Box sx={{ 
-          width: { xs: '85vw', sm: 300 }, 
+        <Box sx={{
+          width: { xs: '85vw', sm: 300 },
           maxWidth: '90vw',
-          height: '100%', 
-          display: 'flex', 
+          height: '100%',
+          display: 'flex',
           flexDirection: 'column',
           paddingBottom: 'env(safe-area-inset-bottom)',
           paddingLeft: 'env(safe-area-inset-left)'
@@ -5674,8 +5965,8 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                   if ((e.target as HTMLElement).closest('button') || (e.target as HTMLElement).closest('input')) {
                     return
                   }
-                      console.log('Mobile: Switching to layer:', l.id)
-                      setActiveLayerId(l.id)
+                  console.log('Mobile: Switching to layer:', l.id)
+                  setActiveLayerId(l.id)
                 }}
                 onDoubleClick={(e) => {
                   // Don't start editing if clicking on buttons
@@ -5725,7 +6016,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                     }}
                   />
                 ) : (
-                <ListItemText primary={l.name} />
+                  <ListItemText primary={l.name} />
                 )}
                 <ListItemSecondaryAction>
                   <IconButton edge="end" size="small" onClick={(e) => {
@@ -5762,7 +6053,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                         const newLineLayerMap: { [key: number]: string } = {}
                         let newIndex = 0
                         Object.keys(currentLineLayerMap).forEach(key => {
-                            const numKey = parseInt(key)
+                          const numKey = parseInt(key)
                           if (currentLineLayerMap[numKey] !== l.id) {
                             newLineLayerMap[newIndex] = currentLineLayerMap[numKey]
                             newIndex++
@@ -5791,10 +6082,10 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                         Object.keys(newMap).forEach(key => {
                           if (newMap[key] === l.id) {
                             delete newMap[key]
-                            }
-                          })
-                          return newMap
+                          }
                         })
+                        return newMap
+                      })
 
                       // Delete all motifs from this layer
                       setMotifLayerMap(currentMotifLayerMap => {
@@ -5805,13 +6096,13 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
 
                         // Clean up motifLayerMap
                         const newMap = { ...currentMotifLayerMap }
-                          Object.keys(newMap).forEach(key => {
-                            if (newMap[key] === l.id) {
+                        Object.keys(newMap).forEach(key => {
+                          if (newMap[key] === l.id) {
                             delete newMap[key]
-                            }
-                          })
-                          return newMap
+                          }
                         })
+                        return newMap
+                      })
 
                       // Set active layer to the first remaining layer
                       const remainingLayers = layers.filter(x => x.id !== l.id)
@@ -5974,17 +6265,17 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
               <Box sx={{ mt: 2 }}>
                 <Typography variant="subtitle2" sx={{ mb: 1 }}>Pressure</Typography>
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                  <Box sx={{ 
-                    width: '100%', 
-                    height: 8, 
-                    bgcolor: 'grey.200', 
-                    borderRadius: 1, 
+                  <Box sx={{
+                    width: '100%',
+                    height: 8,
+                    bgcolor: 'grey.200',
+                    borderRadius: 1,
                     overflow: 'hidden',
                     position: 'relative'
                   }}>
-                    <Box sx={{ 
-                      width: `${currentPressure * 100}%`, 
-                      height: '100%', 
+                    <Box sx={{
+                      width: `${currentPressure * 100}%`,
+                      height: '100%',
                       bgcolor: 'primary.main',
                       transition: 'width 0.1s ease-out'
                     }} />
@@ -6008,17 +6299,17 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
       </Drawer>
 
       {/* Mobile Right Drawer */}
-      <Drawer 
-        anchor="right" 
-        open={rightDrawerOpen} 
+      <Drawer
+        anchor="right"
+        open={rightDrawerOpen}
         onClose={() => setRightDrawerOpen(false)}
         sx={{ display: { xs: 'block', sm: 'block', md: 'none' } }}
       >
-        <Box sx={{ 
-          width: { xs: '85vw', sm: 300 }, 
+        <Box sx={{
+          width: { xs: '85vw', sm: 300 },
           maxWidth: '90vw',
-          height: '100%', 
-          display: 'flex', 
+          height: '100%',
+          display: 'flex',
           flexDirection: 'column',
           paddingBottom: 'env(safe-area-inset-bottom)',
           paddingRight: 'env(safe-area-inset-right)'
@@ -6041,320 +6332,50 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
           {rightSidebarTab === 'jewellery' && (
             <Box sx={{ p: 1.5, display: 'grid', gap: 1.25 }}>
               <Typography variant="subtitle2" sx={{ fontWeight: 'bold' }}>Jewellery Controls</Typography>
-            <ButtonGroup size="small" orientation="vertical" variant="outlined" sx={{ gap: 1 }}>
-              <Button
-                variant="contained"
-                onClick={handleGenerateClick}
-                disabled={isAIProcessing}
-                startIcon={isGenerateLoading ? <CircularProgress size={20} sx={{ color: '#ffffff' }} thickness={4} /> : <AutoFixHigh sx={{ fontSize: '1rem' }} />}
-                sx={{
-                  background: isGenerateLoading 
-                    ? 'linear-gradient(135deg, #1a252f 0%, #000000 100%)'
-                    : 'linear-gradient(135deg, #2c3e50 0%, #000000 100%)',
-                  border: 'none',
-                  borderRadius: 3,
-                  textTransform: 'none',
-                  fontWeight: 600,
-                  fontSize: '0.875rem',
-                  py: 1.5,
-                  px: 2,
-                  boxShadow: isGenerateLoading 
-                    ? '0 8px 32px rgba(44, 62, 80, 0.6), 0 0 20px rgba(255, 255, 255, 0.2)'
-                    : '0 8px 32px rgba(0, 0, 0, 0.3)',
-                  position: 'relative',
-                  overflow: 'hidden',
-                  animation: isGenerateLoading ? 'pulse 2s ease-in-out infinite' : 'none',
-                  '@keyframes pulse': {
-                    '0%, 100%': {
-                      boxShadow: '0 8px 32px rgba(44, 62, 80, 0.6), 0 0 20px rgba(255, 255, 255, 0.2)',
-                    },
-                    '50%': {
-                      boxShadow: '0 8px 32px rgba(44, 62, 80, 0.8), 0 0 30px rgba(255, 255, 255, 0.4)',
-                    },
-                  },
-                  '&:hover': {
-                    background: isGenerateLoading 
-                      ? 'linear-gradient(135deg, #1a252f 0%, #000000 100%)'
-                      : 'linear-gradient(135deg, #1a252f 0%, #000000 100%)',
-                    boxShadow: isGenerateLoading
-                      ? '0 12px 40px rgba(44, 62, 80, 0.7), 0 0 25px rgba(255, 255, 255, 0.3)'
-                      : '0 12px 40px rgba(0, 0, 0, 0.4)',
-                    transform: isGenerateLoading ? 'none' : 'translateY(-2px)',
-                    transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
-                  },
-                  '&:active': {
-                    transform: 'translateY(0px)',
-                    boxShadow: '0 4px 20px rgba(0, 0, 0, 0.3)',
-                  },
-                  '&::before': {
-                    content: '""',
-                    position: 'absolute',
-                    top: 0,
-                    left: '-100%',
-                    width: '100%',
-                    height: '100%',
-                    background: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.2), transparent)',
-                    transition: 'left 0.5s',
-                  },
-                  '&:hover::before': {
-                    left: isGenerateLoading ? '-100%' : '100%',
-                  },
-                  '&.Mui-disabled': {
-                    opacity: 0.6,
-                    cursor: 'not-allowed'
-                  }
-                }}
-              >
-                {isGenerateLoading ? 'Generating...' : 'Generate Jewellery'}
-              </Button>
-              <Button 
-                onClick={handleHarmonizeClick}
-                disabled={isAIProcessing}
-                startIcon={isHarmonizeLoading ? <CircularProgress size={20} sx={{ color: theme.palette.mode === 'dark' ? '#ffffff' : '#1976d2' }} thickness={4} /> : <Settings sx={{ fontSize: '1rem' }} />}
-                sx={{
-                  background: isHarmonizeLoading
-                    ? theme.palette.mode === 'dark'
-                      ? 'linear-gradient(135deg, rgba(255,255,255,0.2) 0%, rgba(255,255,255,0.1) 100%)'
-                      : 'linear-gradient(135deg, rgba(25, 118, 210, 0.15) 0%, rgba(25, 118, 210, 0.08) 100%)'
-                    : 'linear-gradient(135deg, rgba(255,255,255,0.1) 0%, rgba(255,255,255,0.05) 100%)',
-                  backdropFilter: 'blur(10px)',
-                  border: isHarmonizeLoading 
-                    ? theme.palette.mode === 'dark'
-                      ? '1px solid rgba(255,255,255,0.3)'
-                      : '2px solid rgba(25, 118, 210, 0.4)'
-                    : '1px solid rgba(0,0,0,0.1)',
-                  borderRadius: 3,
-                  textTransform: 'none',
-                  fontWeight: 600,
-                  fontSize: '0.875rem',
-                  py: 1.5,
-                  color: 'text.primary',
-                  boxShadow: isHarmonizeLoading
-                    ? theme.palette.mode === 'dark'
-                      ? '0 8px 32px rgba(0,0,0,0.2), 0 0 20px rgba(255, 255, 255, 0.2)'
-                      : '0 8px 32px rgba(25, 118, 210, 0.3), 0 0 25px rgba(25, 118, 210, 0.4)'
-                    : '0 8px 32px rgba(0,0,0,0.1)',
-                  position: 'relative',
-                  overflow: 'hidden',
-                  animation: isHarmonizeLoading ? 'pulseHarmonize 2s ease-in-out infinite' : 'none',
-                  '@keyframes pulseHarmonize': {
-                    '0%, 100%': {
-                      boxShadow: theme.palette.mode === 'dark'
-                        ? '0 8px 32px rgba(0,0,0,0.2), 0 0 20px rgba(255, 255, 255, 0.2)'
-                        : '0 8px 32px rgba(25, 118, 210, 0.3), 0 0 25px rgba(25, 118, 210, 0.4)',
-                    },
-                    '50%': {
-                      boxShadow: theme.palette.mode === 'dark'
-                        ? '0 8px 32px rgba(0,0,0,0.3), 0 0 30px rgba(255, 255, 255, 0.4)'
-                        : '0 8px 32px rgba(25, 118, 210, 0.5), 0 0 35px rgba(25, 118, 210, 0.6)',
-                    },
-                  },
-                  '&:hover': {
-                    background: isHarmonizeLoading
-                      ? theme.palette.mode === 'dark'
-                        ? 'linear-gradient(135deg, rgba(255,255,255,0.2) 0%, rgba(255,255,255,0.1) 100%)'
-                        : 'linear-gradient(135deg, rgba(25, 118, 210, 0.15) 0%, rgba(25, 118, 210, 0.08) 100%)'
-                      : 'linear-gradient(135deg, rgba(255,255,255,0.2) 0%, rgba(255,255,255,0.1) 100%)',
-                    border: isHarmonizeLoading
-                      ? theme.palette.mode === 'dark'
-                        ? '1px solid rgba(255,255,255,0.3)'
-                        : '2px solid rgba(25, 118, 210, 0.5)'
-                      : '1px solid rgba(0,0,0,0.15)',
-                    boxShadow: isHarmonizeLoading
-                      ? theme.palette.mode === 'dark'
-                        ? '0 12px 40px rgba(0,0,0,0.25), 0 0 25px rgba(255, 255, 255, 0.3)'
-                        : '0 12px 40px rgba(25, 118, 210, 0.4), 0 0 30px rgba(25, 118, 210, 0.5)'
-                      : '0 12px 40px rgba(0,0,0,0.15)',
-                    transform: isHarmonizeLoading ? 'none' : 'translateY(-2px)',
-                    transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
-                  },
-                  '&:active': {
-                    transform: 'translateY(0px)',
-                    boxShadow: '0 4px 20px rgba(0,0,0,0.1)',
-                  },
-                  '&::before': {
-                    content: '""',
-                    position: 'absolute',
-                    top: 0,
-                    left: '-100%',
-                    width: '100%',
-                    height: '100%',
-                    background: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.1), transparent)',
-                    transition: 'left 0.5s',
-                  },
-                  '&:hover::before': {
-                    left: isHarmonizeLoading ? '-100%' : '100%',
-                  },
-                  '&.Mui-disabled': {
-                    opacity: 0.6,
-                    cursor: 'not-allowed'
-                  }
-                }}
-              >
-                {isHarmonizeLoading ? 'Harmonizing...' : 'Harmonize'}
-              </Button>
-            </ButtonGroup>
-            {generationError && (
-              <Typography variant="caption" color="error" sx={{ mt: 1, fontWeight: 600 }}>
-                {generationError}
-              </Typography>
-            )}
-            <Divider />
-            <Box sx={{ p: 1.5, display: 'grid', gap: 1 }}>
-            <Typography variant="subtitle2" sx={{ fontWeight: 'bold' }}>Stone Settings</Typography>
-            <Box sx={{ display: 'flex', gap: 1, justifyContent: 'space-between' }}>
-              <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 0.5 }}>
-                <Typography variant="caption" sx={{ fontSize: '0.7rem', color: 'text.secondary', fontWeight: 'bold' }}>Primary</Typography>
-                <StoneGrid selected={primaryStone} onOpen={(e) => { setStoneAnchor(e.currentTarget); setStoneType('primary') }} label={findStoneDetails(primaryStone).label} icon={findStoneDetails(primaryStone).icon} type="primary" />
-              </Box>
-              <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 0.5 }}>
-                <Typography variant="caption" sx={{ fontSize: '0.7rem', color: 'text.secondary', fontWeight: 'bold' }}>Secondary</Typography>
-                <StoneGrid selected={secondaryStone || ''} onOpen={(e) => { setStoneAnchor(e.currentTarget); setStoneType('secondary') }} label={secondaryStone ? findStoneDetails(secondaryStone).label : 'None'} icon={secondaryStone ? findStoneDetails(secondaryStone).icon : ''} type="secondary" />
-              </Box>
-              <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 0.5 }}>
-                <Typography variant="caption" sx={{ fontSize: '0.7rem', color: 'text.secondary', fontWeight: 'bold' }}>Metal</Typography>
-                <MetalGrid selected={metal} onOpen={(e) => setMetalAnchor(e.currentTarget)} label={METALS.find(m => m.key === metal)?.label || ''} />
-              </Box>
-            </Box>
-            <Divider sx={{ my: 1 }} />
-            <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
-              <Button 
-                component="label"
-                variant="contained"
-                startIcon={
-                  <Box sx={{
-                    width: 16,
-                    height: 16,
-                    borderRadius: '50%',
-                    background: 'linear-gradient(135deg, #4caf50 0%, #2e7d32 100%)',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    boxShadow: '0 1px 4px rgba(0,0,0,0.1)',
-                    '&::before': {
-                      content: '""',
-                      width: 6,
-                      height: 6,
-                      borderRadius: '50%',
-                      background: 'linear-gradient(135deg, #ffffff 0%, #f8f8f8 100%)',
-                      boxShadow: '0 1px 2px rgba(0,0,0,0.1)'
-                    }
-                  }} />
-                }
-                sx={(theme) => ({
-                  flex: 1,
-                  borderRadius: 2,
-                  textTransform: 'none',
-                  fontWeight: 600,
-                  fontSize: '0.8rem',
-                  py: 1.25,
-                  px: 2,
-                  position: 'relative',
-                  overflow: 'hidden',
-                  transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
-                  ...(theme.palette.mode === 'dark'
-                    ? {
-                        backgroundColor: '#000',
-                        color: '#fff',
-                        border: '1px solid rgba(255,255,255,0.2)',
-                        boxShadow: '0 4px 16px rgba(0,0,0,0.6)',
-                        '&:hover': {
-                          backgroundColor: '#111',
-                          boxShadow: '0 6px 20px rgba(0,0,0,0.7)'
-                        }
-                      }
-                    : {
-                        background: 'linear-gradient(135deg, #ffffff 0%, #f8f8f8 100%)',
-                        border: '1px solid rgba(0,0,0,0.1)',
-                        color: 'text.primary',
-                        boxShadow: '0 4px 16px rgba(0,0,0,0.08), 0 1px 4px rgba(0,0,0,0.05)',
-                        '&:hover': {
-                          background: 'linear-gradient(135deg, #f8f8f8 0%, #f0f0f0 100%)',
-                          boxShadow: '0 6px 20px rgba(0,0,0,0.12), 0 2px 6px rgba(0,0,0,0.08)',
-                          transform: 'translateY(-1px)',
-                          border: '1px solid rgba(0,0,0,0.15)',
-                        },
-                      }),
-                  '&:active': {
-                    transform: 'translateY(0px)'
-                  },
-                  '&::before': {
-                    content: '""',
-                    position: 'absolute',
-                    top: 0,
-                    left: '-100%',
-                    width: '100%',
-                    height: '100%',
-                    background: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.1), transparent)',
-                    transition: 'left 0.6s ease-out',
-                  },
-                  '&:hover::before': {
-                    left: '100%',
-                  },
-                  '&::after': {
-                    content: '""',
-                    position: 'absolute',
-                    top: '50%',
-                    left: '50%',
-                    width: 0,
-                    height: 0,
-                    borderRadius: '50%',
-                    background: 'rgba(255,255,255,0.08)',
-                    transform: 'translate(-50%, -50%)',
-                    transition: 'width 0.6s ease-out, height 0.6s ease-out',
-                  },
-                  '&:active::after': {
-                    width: '200px',
-                    height: '200px',
-                  }
-                })}
-              >
-                Upload Sketch
-                <input
-                  type="file"
-                  accept="image/*"
-                  style={{ display: 'none' }}
-                  onChange={(e) => {
-                    const file = e.target.files?.[0]
-                    if (file) {
-                      const reader = new FileReader()
-                      reader.onload = (event) => {
-                        const img = new Image()
-                        img.onload = () => {
-                          const newImage = {
-                            id: String(Date.now()),
-                            src: event.target?.result as string,
-                            x: Math.random() * (canvasSize.width - img.width),
-                            y: Math.random() * (canvasSize.height - img.height),
-                            width: Math.min(img.width, 200),
-                            height: Math.min(img.height, 200),
-                            rotation: 0
-                          }
-                          setUploadedImages(prev => [...prev, newImage])
-                          setImageLayerMap(prev => ({ ...prev, [newImage.id]: activeLayerId }))
-                          setSelectedImageId(newImage.id)
-                        }
-                        img.src = event.target?.result as string
-                      }
-                      reader.readAsDataURL(file)
-                    }
-                  }}
-                />
-              </Button>
-              <Tooltip title="Generate with AI">
-                <IconButton
-                  onClick={() => {
-                    console.log('Generate with AI clicked')
-                    // TODO: Implement AI generation
-                  }}
+              <ButtonGroup size="small" orientation="vertical" variant="outlined" sx={{ gap: 1 }}>
+                <Button
+                  variant="contained"
+                  onClick={handleGenerateClick}
+                  disabled={isAIProcessing}
+                  startIcon={isGenerateLoading ? <CircularProgress size={20} sx={{ color: '#ffffff' }} thickness={4} /> : <AutoFixHigh sx={{ fontSize: '1rem' }} />}
                   sx={{
-                    color: 'primary.main',
-                    opacity: 0.8,
-                    transition: 'all 0.2s ease-out',
+                    background: isGenerateLoading
+                      ? 'linear-gradient(135deg, #1a252f 0%, #000000 100%)'
+                      : 'linear-gradient(135deg, #2c3e50 0%, #000000 100%)',
+                    border: 'none',
+                    borderRadius: 3,
+                    textTransform: 'none',
+                    fontWeight: 600,
+                    fontSize: '0.875rem',
+                    py: 1.5,
+                    px: 2,
+                    boxShadow: isGenerateLoading
+                      ? '0 8px 32px rgba(44, 62, 80, 0.6), 0 0 20px rgba(255, 255, 255, 0.2)'
+                      : '0 8px 32px rgba(0, 0, 0, 0.3)',
+                    position: 'relative',
+                    overflow: 'hidden',
+                    animation: isGenerateLoading ? 'pulse 2s ease-in-out infinite' : 'none',
+                    '@keyframes pulse': {
+                      '0%, 100%': {
+                        boxShadow: '0 8px 32px rgba(44, 62, 80, 0.6), 0 0 20px rgba(255, 255, 255, 0.2)',
+                      },
+                      '50%': {
+                        boxShadow: '0 8px 32px rgba(44, 62, 80, 0.8), 0 0 30px rgba(255, 255, 255, 0.4)',
+                      },
+                    },
                     '&:hover': {
-                      backgroundColor: 'primary.light',
-                      color: 'white',
-                      transform: 'scale(1.05)',
+                      background: isGenerateLoading
+                        ? 'linear-gradient(135deg, #1a252f 0%, #000000 100%)'
+                        : 'linear-gradient(135deg, #1a252f 0%, #000000 100%)',
+                      boxShadow: isGenerateLoading
+                        ? '0 12px 40px rgba(44, 62, 80, 0.7), 0 0 25px rgba(255, 255, 255, 0.3)'
+                        : '0 12px 40px rgba(0, 0, 0, 0.4)',
+                      transform: isGenerateLoading ? 'none' : 'translateY(-2px)',
+                      transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+                    },
+                    '&:active': {
+                      transform: 'translateY(0px)',
+                      boxShadow: '0 4px 20px rgba(0, 0, 0, 0.3)',
                     },
                     '&::before': {
                       content: '""',
@@ -6367,175 +6388,256 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                       transition: 'left 0.5s',
                     },
                     '&:hover::before': {
-                      left: '100%',
+                      left: isGenerateLoading ? '-100%' : '100%',
+                    },
+                    '&.Mui-disabled': {
+                      opacity: 0.6,
+                      cursor: 'not-allowed'
                     }
                   }}
                 >
-                  <Campaign sx={{ fontSize: '1.1rem' }} />
-                </IconButton>
-              </Tooltip>
-              <Tooltip title="Remove Selected Image (Delete/Backspace)">
-                <IconButton
-                  onClick={() => {
-                    if (selectedImageId) {
-                      setUploadedImages(prev => prev.filter(img => img.id !== selectedImageId))
-                      setImageLayerMap(prev => {
-                        const newMap = { ...prev }
-                        delete newMap[selectedImageId]
-                        return newMap
-                      })
-                      setSelectedImageId(null)
-                    }
-                  }}
-                  disabled={!selectedImageId}
+                  {isGenerateLoading ? 'Generating...' : 'Generate Jewellery'}
+                </Button>
+                <Button
+                  onClick={handleHarmonizeClick}
+                  disabled={isAIProcessing}
+                  startIcon={isHarmonizeLoading ? <CircularProgress size={20} sx={{ color: theme.palette.mode === 'dark' ? '#ffffff' : '#1976d2' }} thickness={4} /> : <Settings sx={{ fontSize: '1rem' }} />}
                   sx={{
-                    color: 'error.main',
-                    opacity: selectedImageId ? 1 : 0.3,
-                    transition: 'all 0.2s ease-out',
-                    '&:hover': {
-                      backgroundColor: 'error.light',
-                      color: 'white',
-                      transform: 'scale(1.05)',
+                    background: isHarmonizeLoading
+                      ? theme.palette.mode === 'dark'
+                        ? 'linear-gradient(135deg, rgba(255,255,255,0.2) 0%, rgba(255,255,255,0.1) 100%)'
+                        : 'linear-gradient(135deg, rgba(25, 118, 210, 0.15) 0%, rgba(25, 118, 210, 0.08) 100%)'
+                      : 'linear-gradient(135deg, rgba(255,255,255,0.1) 0%, rgba(255,255,255,0.05) 100%)',
+                    backdropFilter: 'blur(10px)',
+                    border: isHarmonizeLoading
+                      ? theme.palette.mode === 'dark'
+                        ? '1px solid rgba(255,255,255,0.3)'
+                        : '2px solid rgba(25, 118, 210, 0.4)'
+                      : '1px solid rgba(0,0,0,0.1)',
+                    borderRadius: 3,
+                    textTransform: 'none',
+                    fontWeight: 600,
+                    fontSize: '0.875rem',
+                    py: 1.5,
+                    color: 'text.primary',
+                    boxShadow: isHarmonizeLoading
+                      ? theme.palette.mode === 'dark'
+                        ? '0 8px 32px rgba(0,0,0,0.2), 0 0 20px rgba(255, 255, 255, 0.2)'
+                        : '0 8px 32px rgba(25, 118, 210, 0.3), 0 0 25px rgba(25, 118, 210, 0.4)'
+                      : '0 8px 32px rgba(0,0,0,0.1)',
+                    position: 'relative',
+                    overflow: 'hidden',
+                    animation: isHarmonizeLoading ? 'pulseHarmonize 2s ease-in-out infinite' : 'none',
+                    '@keyframes pulseHarmonize': {
+                      '0%, 100%': {
+                        boxShadow: theme.palette.mode === 'dark'
+                          ? '0 8px 32px rgba(0,0,0,0.2), 0 0 20px rgba(255, 255, 255, 0.2)'
+                          : '0 8px 32px rgba(25, 118, 210, 0.3), 0 0 25px rgba(25, 118, 210, 0.4)',
+                      },
+                      '50%': {
+                        boxShadow: theme.palette.mode === 'dark'
+                          ? '0 8px 32px rgba(0,0,0,0.3), 0 0 30px rgba(255, 255, 255, 0.4)'
+                          : '0 8px 32px rgba(25, 118, 210, 0.5), 0 0 35px rgba(25, 118, 210, 0.6)',
+                      },
                     },
-                    '&:disabled': {
-                      opacity: 0.3,
-                      cursor: 'not-allowed',
+                    '&:hover': {
+                      background: isHarmonizeLoading
+                        ? theme.palette.mode === 'dark'
+                          ? 'linear-gradient(135deg, rgba(255,255,255,0.2) 0%, rgba(255,255,255,0.1) 100%)'
+                          : 'linear-gradient(135deg, rgba(25, 118, 210, 0.15) 0%, rgba(25, 118, 210, 0.08) 100%)'
+                        : 'linear-gradient(135deg, rgba(255,255,255,0.2) 0%, rgba(255,255,255,0.1) 100%)',
+                      border: isHarmonizeLoading
+                        ? theme.palette.mode === 'dark'
+                          ? '1px solid rgba(255,255,255,0.3)'
+                          : '2px solid rgba(25, 118, 210, 0.5)'
+                        : '1px solid rgba(0,0,0,0.15)',
+                      boxShadow: isHarmonizeLoading
+                        ? theme.palette.mode === 'dark'
+                          ? '0 12px 40px rgba(0,0,0,0.25), 0 0 25px rgba(255, 255, 255, 0.3)'
+                          : '0 12px 40px rgba(25, 118, 210, 0.4), 0 0 30px rgba(25, 118, 210, 0.5)'
+                        : '0 12px 40px rgba(0,0,0,0.15)',
+                      transform: isHarmonizeLoading ? 'none' : 'translateY(-2px)',
+                      transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+                    },
+                    '&:active': {
+                      transform: 'translateY(0px)',
+                      boxShadow: '0 4px 20px rgba(0,0,0,0.1)',
+                    },
+                    '&::before': {
+                      content: '""',
+                      position: 'absolute',
+                      top: 0,
+                      left: '-100%',
+                      width: '100%',
+                      height: '100%',
+                      background: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.1), transparent)',
+                      transition: 'left 0.5s',
+                    },
+                    '&:hover::before': {
+                      left: isHarmonizeLoading ? '-100%' : '100%',
+                    },
+                    '&.Mui-disabled': {
+                      opacity: 0.6,
+                      cursor: 'not-allowed'
                     }
                   }}
                 >
-                  <Close sx={{ fontSize: '1.1rem' }} />
-                </IconButton>
-              </Tooltip>
-            </Box>
-            <Divider sx={{ my: 1 }} />
-            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
-              <Typography variant="subtitle2" sx={{ fontWeight: 'bold', fontSize: '0.8rem' }}>Context</Typography>
-              <TextField
-                multiline
-                rows={3}
-                value={contextText}
-                onChange={(e) => setContextText(e.target.value)}
-                placeholder="Describe your jewelry design context, inspiration, or specific requirements..."
-                variant="outlined"
-                size="small"
-                sx={(theme) => ({
-                  '& .MuiOutlinedInput-root': {
-                    fontSize: '0.8rem',
-                    '& fieldset': {
-                      borderColor: theme.palette.mode === 'dark' ? 'rgba(255,255,255,0.3)' : 'rgba(0,0,0,0.1)'
-                    },
-                    '&:hover fieldset': {
-                      borderColor: theme.palette.mode === 'dark' ? 'rgba(255,255,255,0.5)' : 'rgba(0,0,0,0.2)'
-                    },
-                    '&.Mui-focused fieldset': {
-                      borderColor: theme.palette.mode === 'dark' ? '#ffffff' : theme.palette.primary.main
-                    }
-                  }
-                })}
-              />
-              <Button
-                fullWidth
-                variant="contained"
-                onClick={() => {
-                  if (contextText.trim()) {
-                    callDesignFunction('generate')
-                  }
-                }}
-                disabled={!contextText.trim()}
-                sx={(theme) => ({
-                  borderRadius: 2,
-                  textTransform: 'none',
-                  fontWeight: 600,
-                  fontSize: '0.8rem',
-                  py: 1.25,
-                  position: 'relative',
-                  overflow: 'hidden',
-                  ...(theme.palette.mode === 'dark'
-                    ? {
-                        backgroundColor: contextText.trim() ? '#000' : '#333',
-                        color: contextText.trim() ? '#fff' : '#666',
-                        border: '1px solid rgba(255,255,255,0.2)',
-                        boxShadow: contextText.trim() ? '0 4px 16px rgba(0,0,0,0.6)' : '0 2px 8px rgba(0,0,0,0.3)',
-                        '&:hover': {
-                          backgroundColor: contextText.trim() ? '#111' : '#333',
-                          boxShadow: contextText.trim() ? '0 6px 20px rgba(0,0,0,0.7)' : '0 2px 8px rgba(0,0,0,0.3)'
-                        },
-                        '&:disabled': {
-                          backgroundColor: '#333',
-                          color: '#666',
-                          border: '1px solid rgba(255,255,255,0.1)'
-                        }
-                      }
-                    : {
-                        background: contextText.trim() 
-                          ? 'linear-gradient(135deg, #ffffff 0%, #f8f8f8 100%)'
-                          : 'linear-gradient(135deg, #f5f5f5 0%, #e8e8e8 100%)',
-                        border: '1px solid rgba(0,0,0,0.1)',
-                        color: contextText.trim() ? 'text.primary' : 'text.disabled',
-                        boxShadow: contextText.trim() 
-                          ? '0 4px 16px rgba(0,0,0,0.08), 0 1px 4px rgba(0,0,0,0.05)'
-                          : '0 2px 8px rgba(0,0,0,0.04)',
-                        '&:hover': {
-                          background: contextText.trim() 
-                            ? 'linear-gradient(135deg, #f8f8f8 0%, #f0f0f0 100%)'
-                            : 'linear-gradient(135deg, #f5f5f5 0%, #e8e8e8 100%)',
-                          boxShadow: contextText.trim() 
-                            ? '0 6px 20px rgba(0,0,0,0.12), 0 2px 6px rgba(0,0,0,0.08)'
-                            : '0 2px 8px rgba(0,0,0,0.04)',
-                          transform: contextText.trim() ? 'translateY(-1px)' : 'none',
-                          border: '1px solid rgba(0,0,0,0.15)',
-                        },
-                        '&:disabled': {
-                          background: 'linear-gradient(135deg, #f5f5f5 0%, #e8e8e8 100%)',
-                          color: 'text.disabled'
-                        }
-                      }),
-                  '&:active': {
-                    transform: contextText.trim() ? 'translateY(0px)' : 'none'
-                  },
-                  '&::before': {
-                    content: '""',
-                    position: 'absolute',
-                    top: 0,
-                    left: '-100%',
-                    width: '100%',
-                    height: '100%',
-                    background: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.1), transparent)',
-                    transition: 'left 0.6s ease-out',
-                  },
-                  '&:hover::before': {
-                    left: contextText.trim() ? '100%' : '-100%',
-                  },
-                  '&::after': {
-                    content: '""',
-                    position: 'absolute',
-                    top: '50%',
-                    left: '50%',
-                    width: 0,
-                    height: 0,
-                    borderRadius: '50%',
-                    background: 'rgba(255,255,255,0.08)',
-                    transform: 'translate(-50%, -50%)',
-                    transition: 'width 0.6s ease-out, height 0.6s ease-out',
-                  },
-                  '&:active::after': {
-                    width: contextText.trim() ? '200px' : '0px',
-                    height: contextText.trim() ? '200px' : '0px',
-                  }
-                })}
-              >
-                Generate
-              </Button>
-            </Box>
-            
-            {/* Motif Controls */}
-            {selectedMotifId && (
+                  {isHarmonizeLoading ? 'Harmonizing...' : 'Harmonize'}
+                </Button>
+              </ButtonGroup>
+              {generationError && (
+                <Typography variant="caption" color="error" sx={{ mt: 1, fontWeight: 600 }}>
+                  {generationError}
+                </Typography>
+              )}
+              <Divider />
               <Box sx={{ p: 1.5, display: 'grid', gap: 1 }}>
-                <Typography variant="subtitle2" sx={{ fontWeight: 'bold' }}>Motif Controls</Typography>
+                <Typography variant="subtitle2" sx={{ fontWeight: 'bold' }}>Stone Settings</Typography>
+                <Box sx={{ display: 'flex', gap: 1, justifyContent: 'space-between' }}>
+                  <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 0.5 }}>
+                    <Typography variant="caption" sx={{ fontSize: '0.7rem', color: 'text.secondary', fontWeight: 'bold' }}>Primary</Typography>
+                    <StoneGrid selected={primaryStone} onOpen={(e) => { setStoneAnchor(e.currentTarget); setStoneType('primary') }} label={findStoneDetails(primaryStone).label} icon={findStoneDetails(primaryStone).icon} type="primary" />
+                  </Box>
+                  <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 0.5 }}>
+                    <Typography variant="caption" sx={{ fontSize: '0.7rem', color: 'text.secondary', fontWeight: 'bold' }}>Secondary</Typography>
+                    <StoneGrid selected={secondaryStone || ''} onOpen={(e) => { setStoneAnchor(e.currentTarget); setStoneType('secondary') }} label={secondaryStone ? findStoneDetails(secondaryStone).label : 'None'} icon={secondaryStone ? findStoneDetails(secondaryStone).icon : ''} type="secondary" />
+                  </Box>
+                  <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 0.5 }}>
+                    <Typography variant="caption" sx={{ fontSize: '0.7rem', color: 'text.secondary', fontWeight: 'bold' }}>Metal</Typography>
+                    <MetalGrid selected={metal} onOpen={(e) => setMetalAnchor(e.currentTarget)} label={METALS.find(m => m.key === metal)?.label || ''} />
+                  </Box>
+                </Box>
+                <Divider sx={{ my: 1 }} />
                 <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
-                  <Tooltip title="Duplicate Motif">
+                  <Button
+                    component="label"
+                    variant="contained"
+                    startIcon={
+                      <Box sx={{
+                        width: 16,
+                        height: 16,
+                        borderRadius: '50%',
+                        background: 'linear-gradient(135deg, #4caf50 0%, #2e7d32 100%)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        boxShadow: '0 1px 4px rgba(0,0,0,0.1)',
+                        '&::before': {
+                          content: '""',
+                          width: 6,
+                          height: 6,
+                          borderRadius: '50%',
+                          background: 'linear-gradient(135deg, #ffffff 0%, #f8f8f8 100%)',
+                          boxShadow: '0 1px 2px rgba(0,0,0,0.1)'
+                        }
+                      }} />
+                    }
+                    sx={(theme) => ({
+                      flex: 1,
+                      borderRadius: 2,
+                      textTransform: 'none',
+                      fontWeight: 600,
+                      fontSize: '0.8rem',
+                      py: 1.25,
+                      px: 2,
+                      position: 'relative',
+                      overflow: 'hidden',
+                      transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+                      ...(theme.palette.mode === 'dark'
+                        ? {
+                          backgroundColor: '#000',
+                          color: '#fff',
+                          border: '1px solid rgba(255,255,255,0.2)',
+                          boxShadow: '0 4px 16px rgba(0,0,0,0.6)',
+                          '&:hover': {
+                            backgroundColor: '#111',
+                            boxShadow: '0 6px 20px rgba(0,0,0,0.7)'
+                          }
+                        }
+                        : {
+                          background: 'linear-gradient(135deg, #ffffff 0%, #f8f8f8 100%)',
+                          border: '1px solid rgba(0,0,0,0.1)',
+                          color: 'text.primary',
+                          boxShadow: '0 4px 16px rgba(0,0,0,0.08), 0 1px 4px rgba(0,0,0,0.05)',
+                          '&:hover': {
+                            background: 'linear-gradient(135deg, #f8f8f8 0%, #f0f0f0 100%)',
+                            boxShadow: '0 6px 20px rgba(0,0,0,0.12), 0 2px 6px rgba(0,0,0,0.08)',
+                            transform: 'translateY(-1px)',
+                            border: '1px solid rgba(0,0,0,0.15)',
+                          },
+                        }),
+                      '&:active': {
+                        transform: 'translateY(0px)'
+                      },
+                      '&::before': {
+                        content: '""',
+                        position: 'absolute',
+                        top: 0,
+                        left: '-100%',
+                        width: '100%',
+                        height: '100%',
+                        background: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.1), transparent)',
+                        transition: 'left 0.6s ease-out',
+                      },
+                      '&:hover::before': {
+                        left: '100%',
+                      },
+                      '&::after': {
+                        content: '""',
+                        position: 'absolute',
+                        top: '50%',
+                        left: '50%',
+                        width: 0,
+                        height: 0,
+                        borderRadius: '50%',
+                        background: 'rgba(255,255,255,0.08)',
+                        transform: 'translate(-50%, -50%)',
+                        transition: 'width 0.6s ease-out, height 0.6s ease-out',
+                      },
+                      '&:active::after': {
+                        width: '200px',
+                        height: '200px',
+                      }
+                    })}
+                  >
+                    Upload Sketch
+                    <input
+                      type="file"
+                      accept="image/*"
+                      style={{ display: 'none' }}
+                      onChange={(e) => {
+                        const file = e.target.files?.[0]
+                        if (file) {
+                          const reader = new FileReader()
+                          reader.onload = (event) => {
+                            const img = new Image()
+                            img.onload = () => {
+                              const newImage = {
+                                id: String(Date.now()),
+                                src: event.target?.result as string,
+                                x: Math.random() * (canvasSize.width - img.width),
+                                y: Math.random() * (canvasSize.height - img.height),
+                                width: Math.min(img.width, 200),
+                                height: Math.min(img.height, 200),
+                                rotation: 0
+                              }
+                              setUploadedImages(prev => [...prev, newImage])
+                              setImageLayerMap(prev => ({ ...prev, [newImage.id]: activeLayerId }))
+                              setSelectedImageId(newImage.id)
+                            }
+                            img.src = event.target?.result as string
+                          }
+                          reader.readAsDataURL(file)
+                        }
+                      }}
+                    />
+                  </Button>
+                  <Tooltip title="Generate with AI">
                     <IconButton
-                      onClick={duplicateSelectedMotif}
+                      onClick={() => {
+                        console.log('Generate with AI clicked')
+                        // TODO: Implement AI generation
+                      }}
                       sx={{
                         color: 'primary.main',
                         opacity: 0.8,
@@ -6544,272 +6646,243 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                           backgroundColor: 'primary.light',
                           color: 'white',
                           transform: 'scale(1.05)',
+                        },
+                        '&::before': {
+                          content: '""',
+                          position: 'absolute',
+                          top: 0,
+                          left: '-100%',
+                          width: '100%',
+                          height: '100%',
+                          background: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.2), transparent)',
+                          transition: 'left 0.5s',
+                        },
+                        '&:hover::before': {
+                          left: '100%',
                         }
                       }}
                     >
-                      <ContentCopy sx={{ fontSize: '1.1rem' }} />
+                      <Campaign sx={{ fontSize: '1.1rem' }} />
                     </IconButton>
                   </Tooltip>
-                  <Tooltip title="Remove Selected Motif (Delete/Backspace)">
+                  <Tooltip title="Remove Selected Image (Delete/Backspace)">
                     <IconButton
-                      onClick={removeSelectedMotif}
+                      onClick={() => {
+                        if (selectedImageId) {
+                          setUploadedImages(prev => prev.filter(img => img.id !== selectedImageId))
+                          setImageLayerMap(prev => {
+                            const newMap = { ...prev }
+                            delete newMap[selectedImageId]
+                            return newMap
+                          })
+                          setSelectedImageId(null)
+                        }
+                      }}
+                      disabled={!selectedImageId}
                       sx={{
                         color: 'error.main',
-                        opacity: 1,
+                        opacity: selectedImageId ? 1 : 0.3,
                         transition: 'all 0.2s ease-out',
                         '&:hover': {
                           backgroundColor: 'error.light',
                           color: 'white',
                           transform: 'scale(1.05)',
+                        },
+                        '&:disabled': {
+                          opacity: 0.3,
+                          cursor: 'not-allowed',
                         }
                       }}
                     >
-                      <Delete sx={{ fontSize: '1.1rem' }} />
+                      <Close sx={{ fontSize: '1.1rem' }} />
                     </IconButton>
                   </Tooltip>
                 </Box>
-                <Typography variant="caption" color="text.secondary">
-                  Selected: {insertedMotifs.find(m => m.id === selectedMotifId)?.name || 'Unknown'}
-                </Typography>
-              </Box>
-            )}
-          </Box>
-        </Box>
-        )}
-
-        {rightSidebarTab === 'more' && (
-          <Box sx={{ flex: 1, overflowY: 'auto' }}>
-            <Box sx={{ p: 1.5, display: 'grid', gap: 1.25 }}>
-              <Typography variant="subtitle2" sx={{ fontWeight: 'bold' }}>Motif Library</Typography>
-              
-              
-              {/* Create Motif Button */}
-              <Button
-                variant="contained"
-                onClick={startCreatingMotif}
-                disabled={isCreatingMotif}
-                sx={{
-                  background: isCreatingMotif 
-                    ? 'linear-gradient(135deg, rgba(255,255,255,0.1) 0%, rgba(255,255,255,0.05) 100%)'
-                    : 'linear-gradient(135deg, #0a0a2e 0%, #16213e 50%, #000000 100%)',
-                  backdropFilter: 'blur(10px)',
-                  border: '1px solid rgba(0,0,0,0.1)',
-                  borderRadius: 3,
-                  textTransform: 'none',
-                  fontWeight: 600,
-                  fontSize: '0.875rem',
-                  py: 1.5,
-                  color: 'white',
-                  boxShadow: '0 8px 32px rgba(0,0,0,0.3)',
-                  position: 'relative',
-                  overflow: 'hidden',
-                  '&:hover': {
-                    background: isCreatingMotif 
-                      ? 'linear-gradient(135deg, rgba(255,255,255,0.1) 0%, rgba(255,255,255,0.05) 100%)'
-                      : 'linear-gradient(135deg, #0f0f3a 0%, #1a2a4a 50%, #111111 100%)',
-                    border: '1px solid rgba(0,0,0,0.15)',
-                    boxShadow: '0 12px 40px rgba(0,0,0,0.4)',
-                    transform: 'translateY(-2px)',
-                    transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
-                  },
-                  '&:active': {
-                    transform: 'translateY(0px)',
-                    boxShadow: '0 4px 20px rgba(0,0,0,0.2)',
-                  },
-                  '&::before': {
-                    content: '""',
-                    position: 'absolute',
-                    top: 0,
-                    left: '-100%',
-                    width: '100%',
-                    height: '100%',
-                    background: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.1), transparent)',
-                    transition: 'left 0.5s',
-                  },
-                  '&:hover::before': {
-                    left: '100%',
-                  },
-                  '&:disabled': {
-                    opacity: 0.6,
-                    cursor: 'not-allowed',
-                    transform: 'none',
-                    '&:hover': {
-                      transform: 'none'
-                    }
-                  }
-                }}
-              >
-                {isCreatingMotif ? 'Creating Motif...' : 'Create Motif'}
-              </Button>
-
-              {/* Save/Cancel buttons when creating motif */}
-              {isCreatingMotif && (
-                <Box sx={{ display: 'flex', gap: 1 }}>
-                  <Button
-                    variant="contained"
-                    onClick={saveMotif}
-                    disabled={motifDrawingLines.length === 0}
-                    sx={{
-                      flex: 1,
-                      borderRadius: 2,
-                      textTransform: 'none',
-                      fontWeight: 600,
-                      fontSize: '0.8rem',
-                      py: 1,
-                      background: 'linear-gradient(135deg, #0a0a2e 0%, #16213e 50%, #008a73 100%)',
-                      color: 'white',
-                      '&:hover': {
-                        background: 'linear-gradient(135deg, #0f0f3a 0%, #1a2a4a 50%, #009688 100%)',
-                        transform: 'translateY(-1px)',
-                        boxShadow: '0 4px 12px rgba(0, 138, 115, 0.3)',
-                      },
-                      '&:active': {
-                        transform: 'translateY(0px)',
-                      },
-                      '&:disabled': {
-                        background: 'linear-gradient(135deg, #e0e0e0 0%, #bdbdbd 100%)',
-                        color: 'text.secondary',
-                        transform: 'none',
-                        boxShadow: 'none',
-                        '&:hover': {
-                          transform: 'none',
-                          boxShadow: 'none'
+                <Divider sx={{ my: 1 }} />
+                <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                  <Typography variant="subtitle2" sx={{ fontWeight: 'bold', fontSize: '0.8rem' }}>Context</Typography>
+                  <TextField
+                    multiline
+                    rows={3}
+                    value={contextText}
+                    onChange={(e) => setContextText(e.target.value)}
+                    placeholder="Describe your jewelry design context, inspiration, or specific requirements..."
+                    variant="outlined"
+                    size="small"
+                    sx={(theme) => ({
+                      '& .MuiOutlinedInput-root': {
+                        fontSize: '0.8rem',
+                        '& fieldset': {
+                          borderColor: theme.palette.mode === 'dark' ? 'rgba(255,255,255,0.3)' : 'rgba(0,0,0,0.1)'
+                        },
+                        '&:hover fieldset': {
+                          borderColor: theme.palette.mode === 'dark' ? 'rgba(255,255,255,0.5)' : 'rgba(0,0,0,0.2)'
+                        },
+                        '&.Mui-focused fieldset': {
+                          borderColor: theme.palette.mode === 'dark' ? '#ffffff' : theme.palette.primary.main
                         }
                       }
-                    }}
-                  >
-                    Save Motif
-                  </Button>
+                    })}
+                  />
                   <Button
-                    variant="outlined"
-                    onClick={cancelMotifCreation}
-                    sx={{
-                      flex: 1,
+                    fullWidth
+                    variant="contained"
+                    onClick={() => {
+                      if (contextText.trim()) {
+                        callDesignFunction('generate')
+                      }
+                    }}
+                    disabled={!contextText.trim()}
+                    sx={(theme) => ({
                       borderRadius: 2,
                       textTransform: 'none',
                       fontWeight: 600,
                       fontSize: '0.8rem',
-                      py: 1,
-                      borderColor: 'error.main',
-                      color: 'error.main',
-                      '&:hover': {
-                        borderColor: 'error.dark',
-                        backgroundColor: 'error.light',
-                        color: 'error.dark'
+                      py: 1.25,
+                      position: 'relative',
+                      overflow: 'hidden',
+                      ...(theme.palette.mode === 'dark'
+                        ? {
+                          backgroundColor: contextText.trim() ? '#000' : '#333',
+                          color: contextText.trim() ? '#fff' : '#666',
+                          border: '1px solid rgba(255,255,255,0.2)',
+                          boxShadow: contextText.trim() ? '0 4px 16px rgba(0,0,0,0.6)' : '0 2px 8px rgba(0,0,0,0.3)',
+                          '&:hover': {
+                            backgroundColor: contextText.trim() ? '#111' : '#333',
+                            boxShadow: contextText.trim() ? '0 6px 20px rgba(0,0,0,0.7)' : '0 2px 8px rgba(0,0,0,0.3)'
+                          },
+                          '&:disabled': {
+                            backgroundColor: '#333',
+                            color: '#666',
+                            border: '1px solid rgba(255,255,255,0.1)'
+                          }
+                        }
+                        : {
+                          background: contextText.trim()
+                            ? 'linear-gradient(135deg, #ffffff 0%, #f8f8f8 100%)'
+                            : 'linear-gradient(135deg, #f5f5f5 0%, #e8e8e8 100%)',
+                          border: '1px solid rgba(0,0,0,0.1)',
+                          color: contextText.trim() ? 'text.primary' : 'text.disabled',
+                          boxShadow: contextText.trim()
+                            ? '0 4px 16px rgba(0,0,0,0.08), 0 1px 4px rgba(0,0,0,0.05)'
+                            : '0 2px 8px rgba(0,0,0,0.04)',
+                          '&:hover': {
+                            background: contextText.trim()
+                              ? 'linear-gradient(135deg, #f8f8f8 0%, #f0f0f0 100%)'
+                              : 'linear-gradient(135deg, #f5f5f5 0%, #e8e8e8 100%)',
+                            boxShadow: contextText.trim()
+                              ? '0 6px 20px rgba(0,0,0,0.12), 0 2px 6px rgba(0,0,0,0.08)'
+                              : '0 2px 8px rgba(0,0,0,0.04)',
+                            transform: contextText.trim() ? 'translateY(-1px)' : 'none',
+                            border: '1px solid rgba(0,0,0,0.15)',
+                          },
+                          '&:disabled': {
+                            background: 'linear-gradient(135deg, #f5f5f5 0%, #e8e8e8 100%)',
+                            color: 'text.disabled'
+                          }
+                        }),
+                      '&:active': {
+                        transform: contextText.trim() ? 'translateY(0px)' : 'none'
+                      },
+                      '&::before': {
+                        content: '""',
+                        position: 'absolute',
+                        top: 0,
+                        left: '-100%',
+                        width: '100%',
+                        height: '100%',
+                        background: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.1), transparent)',
+                        transition: 'left 0.6s ease-out',
+                      },
+                      '&:hover::before': {
+                        left: contextText.trim() ? '100%' : '-100%',
+                      },
+                      '&::after': {
+                        content: '""',
+                        position: 'absolute',
+                        top: '50%',
+                        left: '50%',
+                        width: 0,
+                        height: 0,
+                        borderRadius: '50%',
+                        background: 'rgba(255,255,255,0.08)',
+                        transform: 'translate(-50%, -50%)',
+                        transition: 'width 0.6s ease-out, height 0.6s ease-out',
+                      },
+                      '&:active::after': {
+                        width: contextText.trim() ? '200px' : '0px',
+                        height: contextText.trim() ? '200px' : '0px',
                       }
-                    }}
+                    })}
                   >
-                    Cancel
+                    Generate
                   </Button>
                 </Box>
-              )}
 
-              {/* Motif Gallery */}
-              <Box sx={{ mt: 2 }}>
-                <Typography variant="subtitle2" sx={{ fontWeight: 'bold', mb: 1 }}>
-                  Your Motifs ({motifs.length})
-                </Typography>
-                
-                {motifs.length === 0 ? (
-                  <Box sx={{ 
-                    textAlign: 'center', 
-                    py: 3, 
-                    border: '2px dashed', 
-                    borderColor: 'divider', 
-                    borderRadius: 2,
-                    backgroundColor: 'action.hover'
-                  }}>
-                    <Typography variant="body2" color="text.secondary">
-                      No motifs created yet
-                    </Typography>
-                    <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
-                      Click &quot;Create Motif&quot; to start drawing
-                    </Typography>
-                  </Box>
-                ) : (
-                  <Box sx={{ 
-                    display: 'grid', 
-                    gridTemplateColumns: 'repeat(auto-fill, minmax(80px, 1fr))', 
-                    gap: 1 
-                  }}>
-                    {motifs.map((motif) => (
-                      <Box
-                        key={motif.id}
-                        sx={{
-                          aspectRatio: '1',
-                          border: '1px solid',
-                          borderColor: 'divider',
-                          borderRadius: 1,
-                          backgroundColor: 'background.paper',
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          cursor: 'pointer',
-                          position: 'relative',
-                          transition: 'all 0.2s ease',
-                          '&:hover': {
-                            borderColor: 'primary.main',
-                            backgroundColor: 'action.hover',
-                            transform: 'scale(1.05)',
-                            '& .delete-motif-button': {
-                              opacity: 1
-                            }
-                          }
-                        }}
-                        onClick={() => {
-                          console.log('Selected motif:', motif.name)
-                          insertMotif(motif)
-                        }}
-                      >
-                        {renderMotifPreview(motif)}
+                {/* Motif Controls */}
+                {selectedMotifId && (
+                  <Box sx={{ p: 1.5, display: 'grid', gap: 1 }}>
+                    <Typography variant="subtitle2" sx={{ fontWeight: 'bold' }}>Motif Controls</Typography>
+                    <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+                      <Tooltip title="Duplicate Motif">
                         <IconButton
-                          className="delete-motif-button"
-                          size="small"
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            if (confirm(`Delete "${motif.name}"?`)) {
-                              deleteMotifFromLibrary(motif.id)
-                            }
-                          }}
+                          onClick={duplicateSelectedMotif}
                           sx={{
-                            position: 'absolute',
-                            top: 4,
-                            right: 4,
-                            opacity: 0,
-                            transition: 'opacity 0.2s ease',
-                            backgroundColor: 'error.main',
-                            color: 'white',
-                            width: 24,
-                            height: 24,
+                            color: 'primary.main',
+                            opacity: 0.8,
+                            transition: 'all 0.2s ease-out',
                             '&:hover': {
-                              backgroundColor: 'error.dark',
-                              opacity: 1
+                              backgroundColor: 'primary.light',
+                              color: 'white',
+                              transform: 'scale(1.05)',
                             }
                           }}
                         >
-                          <Delete sx={{ fontSize: '0.875rem' }} />
+                          <ContentCopy sx={{ fontSize: '1.1rem' }} />
                         </IconButton>
-                      </Box>
-                    ))}
+                      </Tooltip>
+                      <Tooltip title="Remove Selected Motif (Delete/Backspace)">
+                        <IconButton
+                          onClick={removeSelectedMotif}
+                          sx={{
+                            color: 'error.main',
+                            opacity: 1,
+                            transition: 'all 0.2s ease-out',
+                            '&:hover': {
+                              backgroundColor: 'error.light',
+                              color: 'white',
+                              transform: 'scale(1.05)',
+                            }
+                          }}
+                        >
+                          <Delete sx={{ fontSize: '1.1rem' }} />
+                        </IconButton>
+                      </Tooltip>
+                    </Box>
+                    <Typography variant="caption" color="text.secondary">
+                      Selected: {insertedMotifs.find(m => m.id === selectedMotifId)?.name || 'Unknown'}
+                    </Typography>
                   </Box>
                 )}
               </Box>
+            </Box>
+          )}
 
-              {/* Signature Style Section */}
-              <Box sx={{ mt: 2 }}>
-                <Typography variant="subtitle2" sx={{ fontWeight: 'bold', mb: 1 }}>
-                  Signature Styles ({signatureStyles.length}/4)
-                </Typography>
-                
+          {rightSidebarTab === 'more' && (
+            <Box sx={{ flex: 1, overflowY: 'auto' }}>
+              <Box sx={{ p: 1.5, display: 'grid', gap: 1.25 }}>
+                <Typography variant="subtitle2" sx={{ fontWeight: 'bold' }}>Motif Library</Typography>
+
+
+                {/* Create Motif Button */}
                 <Button
-                  component="label"
                   variant="contained"
-                  disabled={signatureStyles.length >= 4}
+                  onClick={startCreatingMotif}
+                  disabled={isCreatingMotif}
                   sx={{
-                    width: '100%',
-                    background: signatureStyles.length >= 4 
+                    background: isCreatingMotif
                       ? 'linear-gradient(135deg, rgba(255,255,255,0.1) 0%, rgba(255,255,255,0.05) 100%)'
-                      : 'linear-gradient(135deg, rgba(255,255,255,0.1) 0%, rgba(255,255,255,0.05) 100%)',
+                      : 'linear-gradient(135deg, #0a0a2e 0%, #16213e 50%, #000000 100%)',
                     backdropFilter: 'blur(10px)',
                     border: '1px solid rgba(0,0,0,0.1)',
                     borderRadius: 3,
@@ -6817,22 +6890,22 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                     fontWeight: 600,
                     fontSize: '0.875rem',
                     py: 1.5,
-                    color: 'text.primary',
-                    boxShadow: '0 8px 32px rgba(0,0,0,0.1)',
+                    color: 'white',
+                    boxShadow: '0 8px 32px rgba(0,0,0,0.3)',
                     position: 'relative',
                     overflow: 'hidden',
                     '&:hover': {
-                      background: signatureStyles.length >= 4 
+                      background: isCreatingMotif
                         ? 'linear-gradient(135deg, rgba(255,255,255,0.1) 0%, rgba(255,255,255,0.05) 100%)'
-                        : 'linear-gradient(135deg, rgba(255,255,255,0.2) 0%, rgba(255,255,255,0.1) 100%)',
+                        : 'linear-gradient(135deg, #0f0f3a 0%, #1a2a4a 50%, #111111 100%)',
                       border: '1px solid rgba(0,0,0,0.15)',
-                      boxShadow: '0 12px 40px rgba(0,0,0,0.15)',
+                      boxShadow: '0 12px 40px rgba(0,0,0,0.4)',
                       transform: 'translateY(-2px)',
                       transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
                     },
                     '&:active': {
                       transform: 'translateY(0px)',
-                      boxShadow: '0 4px 20px rgba(0,0,0,0.1)',
+                      boxShadow: '0 4px 20px rgba(0,0,0,0.2)',
                     },
                     '&::before': {
                       content: '""',
@@ -6857,265 +6930,483 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
                     }
                   }}
                 >
-                  {signatureStyles.length >= 4 ? 'Maximum 4 styles reached' : 'Upload Signature Style'}
-                  <input
-                    type="file"
-                    accept="image/*"
-                    style={{ display: 'none' }}
-                    onChange={handleSignatureStyleUpload}
-                    disabled={signatureStyles.length >= 4}
-                  />
+                  {isCreatingMotif ? 'Creating Motif...' : 'Create Motif'}
                 </Button>
 
-                {/* Signature Style Gallery */}
-                {signatureStyles.length > 0 && (
-                  <Box sx={{ 
-                    display: 'grid', 
-                    gridTemplateColumns: 'repeat(auto-fill, minmax(60px, 1fr))', 
-                    gap: 1,
-                    mt: 1
-                  }}>
-                    {signatureStyles.map((style) => (
-                      <Box
-                        key={style.id}
-                        sx={{
-                          aspectRatio: '1',
-                          border: '1px solid',
-                          borderColor: 'divider',
-                          borderRadius: 1,
-                          backgroundColor: 'background.paper',
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          cursor: 'pointer',
-                          transition: 'all 0.2s ease',
-                          position: 'relative',
-                          overflow: 'hidden',
+                {/* Save/Cancel buttons when creating motif */}
+                {isCreatingMotif && (
+                  <Box sx={{ display: 'flex', gap: 1 }}>
+                    <Button
+                      variant="contained"
+                      onClick={saveMotif}
+                      disabled={motifDrawingLines.length === 0}
+                      sx={{
+                        flex: 1,
+                        borderRadius: 2,
+                        textTransform: 'none',
+                        fontWeight: 600,
+                        fontSize: '0.8rem',
+                        py: 1,
+                        background: 'linear-gradient(135deg, #0a0a2e 0%, #16213e 50%, #008a73 100%)',
+                        color: 'white',
+                        '&:hover': {
+                          background: 'linear-gradient(135deg, #0f0f3a 0%, #1a2a4a 50%, #009688 100%)',
+                          transform: 'translateY(-1px)',
+                          boxShadow: '0 4px 12px rgba(0, 138, 115, 0.3)',
+                        },
+                        '&:active': {
+                          transform: 'translateY(0px)',
+                        },
+                        '&:disabled': {
+                          background: 'linear-gradient(135deg, #e0e0e0 0%, #bdbdbd 100%)',
+                          color: 'text.secondary',
+                          transform: 'none',
+                          boxShadow: 'none',
                           '&:hover': {
-                            borderColor: 'primary.main',
-                            backgroundColor: 'action.hover',
-                            transform: 'scale(1.05)'
+                            transform: 'none',
+                            boxShadow: 'none'
                           }
-                        }}
-                        onClick={() => {
-                          console.log('Selected signature style:', style.name)
-                          // TODO: Apply signature style to canvas or selected elements
-                        }}
-                      >
-                        <img
-                          src={style.url}
-                          alt={style.name}
-                          style={{
-                            width: '100%',
-                            height: '100%',
-                            objectFit: 'cover'
-                          }}
-                        />
-                        <IconButton
-                          size="small"
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            removeSignatureStyle(style.id)
-                          }}
-                          sx={{
-                            position: 'absolute',
-                            top: 2,
-                            right: 2,
-                            width: 16,
-                            height: 16,
-                            backgroundColor: 'error.main',
-                            color: 'white',
-                            '&:hover': {
-                              backgroundColor: 'error.dark'
-                            }
-                          }}
-                        >
-                          <Close sx={{ fontSize: '0.7rem' }} />
-                        </IconButton>
-                      </Box>
-                    ))}
+                        }
+                      }}
+                    >
+                      Save Motif
+                    </Button>
+                    <Button
+                      variant="outlined"
+                      onClick={cancelMotifCreation}
+                      sx={{
+                        flex: 1,
+                        borderRadius: 2,
+                        textTransform: 'none',
+                        fontWeight: 600,
+                        fontSize: '0.8rem',
+                        py: 1,
+                        borderColor: 'error.main',
+                        color: 'error.main',
+                        '&:hover': {
+                          borderColor: 'error.dark',
+                          backgroundColor: 'error.light',
+                          color: 'error.dark'
+                        }
+                      }}
+                    >
+                      Cancel
+                    </Button>
                   </Box>
                 )}
-              </Box>
-              
-              {/* Divider */}
-              <Divider sx={{ my: 2 }} />
-              
-              {/* Content Builder Section */}
-              <Typography variant="subtitle2" sx={{ fontWeight: 'bold', mb: 1 }}>
-                Content Builder
-              </Typography>
-              
-              {/* Style and Region Dropdowns */}
-              <Box sx={{ display: 'flex', gap: 1, mb: 2 }}>
-                <Button
+
+                {/* Motif Gallery */}
+                <Box sx={{ mt: 2 }}>
+                  <Typography variant="subtitle2" sx={{ fontWeight: 'bold', mb: 1 }}>
+                    Your Motifs ({motifs.length})
+                  </Typography>
+
+                  {motifs.length === 0 ? (
+                    <Box sx={{
+                      textAlign: 'center',
+                      py: 3,
+                      border: '2px dashed',
+                      borderColor: 'divider',
+                      borderRadius: 2,
+                      backgroundColor: 'action.hover'
+                    }}>
+                      <Typography variant="body2" color="text.secondary">
+                        No motifs created yet
+                      </Typography>
+                      <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
+                        Click &quot;Create Motif&quot; to start drawing
+                      </Typography>
+                    </Box>
+                  ) : (
+                    <Box sx={{
+                      display: 'grid',
+                      gridTemplateColumns: 'repeat(auto-fill, minmax(80px, 1fr))',
+                      gap: 1
+                    }}>
+                      {motifs.map((motif) => (
+                        <Box
+                          key={motif.id}
+                          sx={{
+                            aspectRatio: '1',
+                            border: '1px solid',
+                            borderColor: 'divider',
+                            borderRadius: 1,
+                            backgroundColor: 'background.paper',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            cursor: 'pointer',
+                            position: 'relative',
+                            transition: 'all 0.2s ease',
+                            '&:hover': {
+                              borderColor: 'primary.main',
+                              backgroundColor: 'action.hover',
+                              transform: 'scale(1.05)',
+                              '& .delete-motif-button': {
+                                opacity: 1
+                              }
+                            }
+                          }}
+                          onClick={() => {
+                            console.log('Selected motif:', motif.name)
+                            insertMotif(motif)
+                          }}
+                        >
+                          {renderMotifPreview(motif)}
+                          <IconButton
+                            className="delete-motif-button"
+                            size="small"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              if (confirm(`Delete "${motif.name}"?`)) {
+                                deleteMotifFromLibrary(motif.id)
+                              }
+                            }}
+                            sx={{
+                              position: 'absolute',
+                              top: 4,
+                              right: 4,
+                              opacity: 0,
+                              transition: 'opacity 0.2s ease',
+                              backgroundColor: 'error.main',
+                              color: 'white',
+                              width: 24,
+                              height: 24,
+                              '&:hover': {
+                                backgroundColor: 'error.dark',
+                                opacity: 1
+                              }
+                            }}
+                          >
+                            <Delete sx={{ fontSize: '0.875rem' }} />
+                          </IconButton>
+                        </Box>
+                      ))}
+                    </Box>
+                  )}
+                </Box>
+
+                {/* Signature Style Section */}
+                <Box sx={{ mt: 2 }}>
+                  <Typography variant="subtitle2" sx={{ fontWeight: 'bold', mb: 1 }}>
+                    Signature Styles ({signatureStyles.length}/4)
+                  </Typography>
+
+                  <Button
+                    component="label"
+                    variant="contained"
+                    disabled={signatureStyles.length >= 4}
+                    sx={{
+                      width: '100%',
+                      background: signatureStyles.length >= 4
+                        ? 'linear-gradient(135deg, rgba(255,255,255,0.1) 0%, rgba(255,255,255,0.05) 100%)'
+                        : 'linear-gradient(135deg, rgba(255,255,255,0.1) 0%, rgba(255,255,255,0.05) 100%)',
+                      backdropFilter: 'blur(10px)',
+                      border: '1px solid rgba(0,0,0,0.1)',
+                      borderRadius: 3,
+                      textTransform: 'none',
+                      fontWeight: 600,
+                      fontSize: '0.875rem',
+                      py: 1.5,
+                      color: 'text.primary',
+                      boxShadow: '0 8px 32px rgba(0,0,0,0.1)',
+                      position: 'relative',
+                      overflow: 'hidden',
+                      '&:hover': {
+                        background: signatureStyles.length >= 4
+                          ? 'linear-gradient(135deg, rgba(255,255,255,0.1) 0%, rgba(255,255,255,0.05) 100%)'
+                          : 'linear-gradient(135deg, rgba(255,255,255,0.2) 0%, rgba(255,255,255,0.1) 100%)',
+                        border: '1px solid rgba(0,0,0,0.15)',
+                        boxShadow: '0 12px 40px rgba(0,0,0,0.15)',
+                        transform: 'translateY(-2px)',
+                        transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+                      },
+                      '&:active': {
+                        transform: 'translateY(0px)',
+                        boxShadow: '0 4px 20px rgba(0,0,0,0.1)',
+                      },
+                      '&::before': {
+                        content: '""',
+                        position: 'absolute',
+                        top: 0,
+                        left: '-100%',
+                        width: '100%',
+                        height: '100%',
+                        background: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.1), transparent)',
+                        transition: 'left 0.5s',
+                      },
+                      '&:hover::before': {
+                        left: '100%',
+                      },
+                      '&:disabled': {
+                        opacity: 0.6,
+                        cursor: 'not-allowed',
+                        transform: 'none',
+                        '&:hover': {
+                          transform: 'none'
+                        }
+                      }
+                    }}
+                  >
+                    {signatureStyles.length >= 4 ? 'Maximum 4 styles reached' : 'Upload Signature Style'}
+                    <input
+                      type="file"
+                      accept="image/*"
+                      style={{ display: 'none' }}
+                      onChange={handleSignatureStyleUpload}
+                      disabled={signatureStyles.length >= 4}
+                    />
+                  </Button>
+
+                  {/* Signature Style Gallery */}
+                  {signatureStyles.length > 0 && (
+                    <Box sx={{
+                      display: 'grid',
+                      gridTemplateColumns: 'repeat(auto-fill, minmax(60px, 1fr))',
+                      gap: 1,
+                      mt: 1
+                    }}>
+                      {signatureStyles.map((style) => (
+                        <Box
+                          key={style.id}
+                          sx={{
+                            aspectRatio: '1',
+                            border: '1px solid',
+                            borderColor: 'divider',
+                            borderRadius: 1,
+                            backgroundColor: 'background.paper',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            cursor: 'pointer',
+                            transition: 'all 0.2s ease',
+                            position: 'relative',
+                            overflow: 'hidden',
+                            '&:hover': {
+                              borderColor: 'primary.main',
+                              backgroundColor: 'action.hover',
+                              transform: 'scale(1.05)'
+                            }
+                          }}
+                          onClick={() => {
+                            console.log('Selected signature style:', style.name)
+                            // TODO: Apply signature style to canvas or selected elements
+                          }}
+                        >
+                          <img
+                            src={style.url}
+                            alt={style.name}
+                            style={{
+                              width: '100%',
+                              height: '100%',
+                              objectFit: 'cover'
+                            }}
+                          />
+                          <IconButton
+                            size="small"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              removeSignatureStyle(style.id)
+                            }}
+                            sx={{
+                              position: 'absolute',
+                              top: 2,
+                              right: 2,
+                              width: 16,
+                              height: 16,
+                              backgroundColor: 'error.main',
+                              color: 'white',
+                              '&:hover': {
+                                backgroundColor: 'error.dark'
+                              }
+                            }}
+                          >
+                            <Close sx={{ fontSize: '0.7rem' }} />
+                          </IconButton>
+                        </Box>
+                      ))}
+                    </Box>
+                  )}
+                </Box>
+
+                {/* Divider */}
+                <Divider sx={{ my: 2 }} />
+
+                {/* Content Builder Section */}
+                <Typography variant="subtitle2" sx={{ fontWeight: 'bold', mb: 1 }}>
+                  Content Builder
+                </Typography>
+
+                {/* Style and Region Dropdowns */}
+                <Box sx={{ display: 'flex', gap: 1, mb: 2 }}>
+                  <Button
+                    variant="outlined"
+                    onClick={(e) => setStyleAnchor(e.currentTarget)}
+                    sx={{
+                      flex: 1,
+                      borderRadius: 2,
+                      textTransform: 'none',
+                      fontWeight: 600,
+                      fontSize: '0.8rem',
+                      py: 1,
+                      borderColor: 'divider',
+                      color: 'text.primary',
+                      '&:hover': {
+                        borderColor: 'primary.main',
+                        backgroundColor: 'action.hover',
+                      }
+                    }}
+                  >
+                    Style: {selectedStyle}
+                  </Button>
+                  <Button
+                    variant="outlined"
+                    onClick={(e) => setRegionAnchor(e.currentTarget)}
+                    sx={{
+                      flex: 1,
+                      borderRadius: 2,
+                      textTransform: 'none',
+                      fontWeight: 600,
+                      fontSize: '0.8rem',
+                      py: 1,
+                      borderColor: 'divider',
+                      color: 'text.primary',
+                      '&:hover': {
+                        borderColor: 'primary.main',
+                        backgroundColor: 'action.hover',
+                      }
+                    }}
+                  >
+                    Region: {selectedRegion}
+                  </Button>
+                </Box>
+
+                {/* Content Details Text Field */}
+                <TextField
+                  multiline
+                  rows={3}
+                  value={contentDetails}
+                  onChange={(e) => setContentDetails(e.target.value)}
+                  placeholder="Enter content details and context for your jewelry design..."
                   variant="outlined"
-                  onClick={(e) => setStyleAnchor(e.currentTarget)}
-                  sx={{
-                    flex: 1,
-                    borderRadius: 2,
-                    textTransform: 'none',
-                    fontWeight: 600,
-                    fontSize: '0.8rem',
-                    py: 1,
-                    borderColor: 'divider',
-                    color: 'text.primary',
-                    '&:hover': {
-                      borderColor: 'primary.main',
-                      backgroundColor: 'action.hover',
+                  size="small"
+                  sx={(theme) => ({
+                    '& .MuiOutlinedInput-root': {
+                      fontSize: '0.8rem',
+                      '& fieldset': {
+                        borderColor: theme.palette.mode === 'dark' ? 'rgba(255,255,255,0.3)' : 'rgba(0,0,0,0.1)'
+                      },
+                      '&:hover fieldset': {
+                        borderColor: theme.palette.mode === 'dark' ? 'rgba(255,255,255,0.5)' : 'rgba(0,0,0,0.2)'
+                      },
+                      '&.Mui-focused fieldset': {
+                        borderColor: theme.palette.mode === 'dark' ? '#ffffff' : theme.palette.primary.main
+                      }
                     }
-                  }}
-                >
-                  Style: {selectedStyle}
-                </Button>
+                  })}
+                />
+
+                {/* Generate Content Button */}
                 <Button
-                  variant="outlined"
-                  onClick={(e) => setRegionAnchor(e.currentTarget)}
-                  sx={{
-                    flex: 1,
-                    borderRadius: 2,
-                    textTransform: 'none',
-                    fontWeight: 600,
-                    fontSize: '0.8rem',
-                    py: 1,
-                    borderColor: 'divider',
-                    color: 'text.primary',
-                    '&:hover': {
-                      borderColor: 'primary.main',
-                      backgroundColor: 'action.hover',
-                    }
+                  variant="contained"
+                  onClick={() => {
+                    console.log('Generate Content clicked', {
+                      style: selectedStyle,
+                      region: selectedRegion,
+                      contentDetails: contentDetails
+                    })
+                    // TODO: Implement content generation
                   }}
-                >
-                  Region: {selectedRegion}
-                </Button>
-              </Box>
-              
-              {/* Content Details Text Field */}
-              <TextField
-                multiline
-                rows={3}
-                value={contentDetails}
-                onChange={(e) => setContentDetails(e.target.value)}
-                placeholder="Enter content details and context for your jewelry design..."
-                variant="outlined"
-                size="small"
-                sx={(theme) => ({
-                  '& .MuiOutlinedInput-root': {
-                    fontSize: '0.8rem',
-                    '& fieldset': {
-                      borderColor: theme.palette.mode === 'dark' ? 'rgba(255,255,255,0.3)' : 'rgba(0,0,0,0.1)'
-                    },
-                    '&:hover fieldset': {
-                      borderColor: theme.palette.mode === 'dark' ? 'rgba(255,255,255,0.5)' : 'rgba(0,0,0,0.2)'
-                    },
-                    '&.Mui-focused fieldset': {
-                      borderColor: theme.palette.mode === 'dark' ? '#ffffff' : theme.palette.primary.main
-                    }
-                  }
-                })}
-              />
-              
-              {/* Generate Content Button */}
-              <Button
-                variant="contained"
-                onClick={() => {
-                  console.log('Generate Content clicked', {
-                    style: selectedStyle,
-                    region: selectedRegion,
-                    contentDetails: contentDetails
-                  })
-                  // TODO: Implement content generation
-                }}
-                disabled={!contentDetails.trim()}
-                sx={{
-                  background: contentDetails.trim() 
-                    ? 'linear-gradient(135deg, #2c3e50 0%, #000000 100%)'
-                    : theme.palette.mode === 'dark' 
-                      ? 'linear-gradient(135deg, #424242 0%, #616161 100%)'
-                      : 'linear-gradient(135deg, #e0e0e0 0%, #bdbdbd 100%)',
-                  border: 'none',
-                  borderRadius: 3,
-                  textTransform: 'none',
-                  fontWeight: 600,
-                  fontSize: '0.875rem',
-                  py: 1.5,
-                  boxShadow: contentDetails.trim() 
-                    ? '0 8px 32px rgba(0, 0, 0, 0.3)'
-                    : '0 4px 16px rgba(0, 0, 0, 0.1)',
-                  position: 'relative',
-                  overflow: 'hidden',
-                  color: contentDetails.trim() ? 'white' : theme.palette.mode === 'dark' ? 'white' : 'text.secondary',
-                  '&:hover': {
-                    background: contentDetails.trim() 
-                      ? 'linear-gradient(135deg, #1a252f 0%, #000000 100%)'
-                      : theme.palette.mode === 'dark' 
-                        ? 'linear-gradient(135deg, #525252 0%, #757575 100%)'
+                  disabled={!contentDetails.trim()}
+                  sx={{
+                    background: contentDetails.trim()
+                      ? 'linear-gradient(135deg, #2c3e50 0%, #000000 100%)'
+                      : theme.palette.mode === 'dark'
+                        ? 'linear-gradient(135deg, #424242 0%, #616161 100%)'
                         : 'linear-gradient(135deg, #e0e0e0 0%, #bdbdbd 100%)',
-                    boxShadow: contentDetails.trim() 
-                      ? '0 12px 40px rgba(0, 0, 0, 0.4)'
+                    border: 'none',
+                    borderRadius: 3,
+                    textTransform: 'none',
+                    fontWeight: 600,
+                    fontSize: '0.875rem',
+                    py: 1.5,
+                    boxShadow: contentDetails.trim()
+                      ? '0 8px 32px rgba(0, 0, 0, 0.3)'
                       : '0 4px 16px rgba(0, 0, 0, 0.1)',
-                    transform: contentDetails.trim() ? 'translateY(-2px)' : 'none',
-                    transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
-                  },
-                  '&:active': {
-                    transform: contentDetails.trim() ? 'translateY(0px)' : 'none',
-                    boxShadow: contentDetails.trim() 
-                      ? '0 4px 20px rgba(0, 0, 0, 0.2)'
-                      : '0 4px 16px rgba(0, 0, 0, 0.1)',
-                  },
-                  '&:disabled': {
-                    opacity: 0.6,
-                    cursor: 'not-allowed',
-                    transform: 'none',
+                    position: 'relative',
+                    overflow: 'hidden',
+                    color: contentDetails.trim() ? 'white' : theme.palette.mode === 'dark' ? 'white' : 'text.secondary',
                     '&:hover': {
-                      transform: 'none'
+                      background: contentDetails.trim()
+                        ? 'linear-gradient(135deg, #1a252f 0%, #000000 100%)'
+                        : theme.palette.mode === 'dark'
+                          ? 'linear-gradient(135deg, #525252 0%, #757575 100%)'
+                          : 'linear-gradient(135deg, #e0e0e0 0%, #bdbdbd 100%)',
+                      boxShadow: contentDetails.trim()
+                        ? '0 12px 40px rgba(0, 0, 0, 0.4)'
+                        : '0 4px 16px rgba(0, 0, 0, 0.1)',
+                      transform: contentDetails.trim() ? 'translateY(-2px)' : 'none',
+                      transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+                    },
+                    '&:active': {
+                      transform: contentDetails.trim() ? 'translateY(0px)' : 'none',
+                      boxShadow: contentDetails.trim()
+                        ? '0 4px 20px rgba(0, 0, 0, 0.2)'
+                        : '0 4px 16px rgba(0, 0, 0, 0.1)',
+                    },
+                    '&:disabled': {
+                      opacity: 0.6,
+                      cursor: 'not-allowed',
+                      transform: 'none',
+                      '&:hover': {
+                        transform: 'none'
+                      }
+                    },
+                    '&::before': {
+                      content: '""',
+                      position: 'absolute',
+                      top: 0,
+                      left: '-100%',
+                      width: '100%',
+                      height: '100%',
+                      background: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.1), transparent)',
+                      transition: 'left 0.6s ease-out',
+                    },
+                    '&:hover::before': {
+                      left: contentDetails.trim() ? '100%' : '-100%',
+                    },
+                    '&::after': {
+                      content: '""',
+                      position: 'absolute',
+                      top: '50%',
+                      left: '50%',
+                      width: 0,
+                      height: 0,
+                      borderRadius: '50%',
+                      background: 'rgba(255,255,255,0.08)',
+                      transform: 'translate(-50%, -50%)',
+                      transition: 'width 0.6s ease-out, height 0.6s ease-out',
+                    },
+                    '&:active::after': {
+                      width: contentDetails.trim() ? '200px' : '0px',
+                      height: contentDetails.trim() ? '200px' : '0px',
                     }
-                  },
-                  '&::before': {
-                    content: '""',
-                    position: 'absolute',
-                    top: 0,
-                    left: '-100%',
-                    width: '100%',
-                    height: '100%',
-                    background: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.1), transparent)',
-                    transition: 'left 0.6s ease-out',
-                  },
-                  '&:hover::before': {
-                    left: contentDetails.trim() ? '100%' : '-100%',
-                  },
-                  '&::after': {
-                    content: '""',
-                    position: 'absolute',
-                    top: '50%',
-                    left: '50%',
-                    width: 0,
-                    height: 0,
-                    borderRadius: '50%',
-                    background: 'rgba(255,255,255,0.08)',
-                    transform: 'translate(-50%, -50%)',
-                    transition: 'width 0.6s ease-out, height 0.6s ease-out',
-                  },
-                  '&:active::after': {
-                    width: contentDetails.trim() ? '200px' : '0px',
-                    height: contentDetails.trim() ? '200px' : '0px',
-                  }
-                }}
-              >
-                Generate Content
-              </Button>
+                  }}
+                >
+                  Generate Content
+                </Button>
+              </Box>
             </Box>
-          </Box>
-        )}
+          )}
         </Box>
       </Drawer>
 
       {/* Mobile Floating Action Buttons */}
       <Fab
-        sx={{ 
-          position: 'fixed', 
-          bottom: { xs: 'max(16px, calc(16px + env(safe-area-inset-bottom)))', md: 16 }, 
-          left: { xs: 'max(16px, calc(16px + env(safe-area-inset-left)))', md: 16 }, 
+        sx={{
+          position: 'fixed',
+          bottom: { xs: 'max(16px, calc(16px + env(safe-area-inset-bottom)))', md: 16 },
+          left: { xs: 'max(16px, calc(16px + env(safe-area-inset-left)))', md: 16 },
           display: { xs: 'flex', sm: 'flex', md: 'none' },
           zIndex: 1000,
           minWidth: { xs: 48, md: 56 },
@@ -7135,10 +7426,10 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
         <LayersIcon />
       </Fab>
       <Fab
-        sx={{ 
-          position: 'fixed', 
-          bottom: { xs: 'max(16px, calc(16px + env(safe-area-inset-bottom)))', md: 16 }, 
-          right: { xs: 'max(16px, calc(16px + env(safe-area-inset-right)))', md: 16 }, 
+        sx={{
+          position: 'fixed',
+          bottom: { xs: 'max(16px, calc(16px + env(safe-area-inset-bottom)))', md: 16 },
+          right: { xs: 'max(16px, calc(16px + env(safe-area-inset-right)))', md: 16 },
           display: { xs: 'flex', sm: 'flex', md: 'none' },
           zIndex: 1000,
           minWidth: { xs: 48, md: 56 },
@@ -7227,134 +7518,134 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
               paddingBottom: { xs: 'env(safe-area-inset-bottom)', md: 0 }
             }}
           >
-          {/* Header */}
-          <Box
-            sx={{
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-              px: 1.5,
-              py: 0.75,
-              borderBottom: '1px solid',
-              borderColor: 'divider',
-            }}
-          >
-            <Typography variant="body2" sx={{ fontWeight: 600, fontSize: '0.875rem' }}>
-              Generated Images
-            </Typography>
-            <IconButton
-              size="small"
-              onClick={() => setImageLibraryExpanded(false)}
-              sx={{ ml: 1, p: 0.5 }}
+            {/* Header */}
+            <Box
+              sx={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                px: 1.5,
+                py: 0.75,
+                borderBottom: '1px solid',
+                borderColor: 'divider',
+              }}
             >
-              <ExpandMore fontSize="small" />
-            </IconButton>
-          </Box>
-
-          {/* Image Thumbnails */}
-          <Box
-            sx={{
-              flex: 1,
-              overflowX: 'auto',
-              overflowY: 'hidden',
-              px: 1.5,
-              py: 1,
-              display: 'flex',
-              gap: 1.5,
-              '&::-webkit-scrollbar': {
-                height: '6px',
-              },
-              '&::-webkit-scrollbar-track': {
-                background: 'rgba(0, 0, 0, 0.1)',
-                borderRadius: '3px',
-              },
-              '&::-webkit-scrollbar-thumb': {
-                background: 'rgba(0, 0, 0, 0.3)',
-                borderRadius: '3px',
-                '&:hover': {
-                  background: 'rgba(0, 0, 0, 0.5)',
-                },
-              },
-            }}
-          >
-            {generatedImages.length === 0 ? (
-              <Typography
-                variant="body2"
-                color="text.secondary"
-                sx={{ alignSelf: 'center', py: 2, fontSize: '0.8125rem' }}
-              >
-                No images generated yet
+              <Typography variant="body2" sx={{ fontWeight: 600, fontSize: '0.875rem' }}>
+                Generated Images
               </Typography>
-            ) : (
-              generatedImages.map((imageUrl, index) => (
-                <Box
-                  key={`${imageUrl}-${index}`}
-                  sx={{
-                    position: 'relative',
-                    flexShrink: 0,
-                    width: { xs: 70, sm: 80, md: 90, lg: 100 },
-                    height: { xs: 70, sm: 80, md: 90, lg: 100 },
-                    cursor: 'pointer',
-                    borderRadius: 1,
-                    overflow: 'hidden',
-                    border: '2px solid',
-                    borderColor: currentViewImageUrl === imageUrl ? 'primary.main' : 'divider',
-                    transition: 'all 0.2s ease',
-                    '&:hover': {
-                      borderColor: 'primary.main',
-                      transform: 'scale(1.05)',
-                      '& .download-button': {
-                        opacity: 1,
+              <IconButton
+                size="small"
+                onClick={() => setImageLibraryExpanded(false)}
+                sx={{ ml: 1, p: 0.5 }}
+              >
+                <ExpandMore fontSize="small" />
+              </IconButton>
+            </Box>
+
+            {/* Image Thumbnails */}
+            <Box
+              sx={{
+                flex: 1,
+                overflowX: 'auto',
+                overflowY: 'hidden',
+                px: 1.5,
+                py: 1,
+                display: 'flex',
+                gap: 1.5,
+                '&::-webkit-scrollbar': {
+                  height: '6px',
+                },
+                '&::-webkit-scrollbar-track': {
+                  background: 'rgba(0, 0, 0, 0.1)',
+                  borderRadius: '3px',
+                },
+                '&::-webkit-scrollbar-thumb': {
+                  background: 'rgba(0, 0, 0, 0.3)',
+                  borderRadius: '3px',
+                  '&:hover': {
+                    background: 'rgba(0, 0, 0, 0.5)',
+                  },
+                },
+              }}
+            >
+              {generatedImages.length === 0 ? (
+                <Typography
+                  variant="body2"
+                  color="text.secondary"
+                  sx={{ alignSelf: 'center', py: 2, fontSize: '0.8125rem' }}
+                >
+                  No images generated yet
+                </Typography>
+              ) : (
+                generatedImages.map((imageUrl, index) => (
+                  <Box
+                    key={`${imageUrl}-${index}`}
+                    sx={{
+                      position: 'relative',
+                      flexShrink: 0,
+                      width: { xs: 70, sm: 80, md: 90, lg: 100 },
+                      height: { xs: 70, sm: 80, md: 90, lg: 100 },
+                      cursor: 'pointer',
+                      borderRadius: 1,
+                      overflow: 'hidden',
+                      border: '2px solid',
+                      borderColor: currentViewImageUrl === imageUrl ? 'primary.main' : 'divider',
+                      transition: 'all 0.2s ease',
+                      '&:hover': {
+                        borderColor: 'primary.main',
+                        transform: 'scale(1.05)',
+                        '& .download-button': {
+                          opacity: 1,
+                        },
                       },
-                    },
-                  }}
+                    }}
                     onClick={() => {
                       setCurrentViewImageUrl(imageUrl)
                       // Show comparison bar when image is selected from library
                       // The useEffect will handle loading the image and showing the comparison
                     }}
-                >
-                  <Box
-                    component="img"
-                    src={imageUrl}
-                    alt={`Generated image ${index + 1}`}
-                    sx={{
-                      width: '100%',
-                      height: '100%',
-                      objectFit: 'cover',
-                      display: 'block',
-                    }}
-                    onError={(e) => {
-                      const target = e.target as HTMLImageElement
-                      target.style.display = 'none'
-                    }}
-                  />
-                  {/* Download Button Overlay */}
-                  <IconButton
-                    className="download-button"
-                    size="small"
-                    onClick={(e) => handleDownloadImageFromLibrary(imageUrl, e)}
-                    sx={{
-                      position: 'absolute',
-                      top: 2,
-                      right: 2,
-                      bgcolor: 'background.paper',
-                      opacity: 0,
-                      transition: 'opacity 0.2s ease',
-                      p: 0.5,
-                      '&:hover': {
-                        bgcolor: 'primary.main',
-                        color: 'primary.contrastText',
-                      },
-                    }}
                   >
-                    <Download sx={{ fontSize: '0.875rem' }} />
-                  </IconButton>
-                </Box>
-              ))
-            )}
+                    <Box
+                      component="img"
+                      src={imageUrl}
+                      alt={`Generated image ${index + 1}`}
+                      sx={{
+                        width: '100%',
+                        height: '100%',
+                        objectFit: 'cover',
+                        display: 'block',
+                      }}
+                      onError={(e) => {
+                        const target = e.target as HTMLImageElement
+                        target.style.display = 'none'
+                      }}
+                    />
+                    {/* Download Button Overlay */}
+                    <IconButton
+                      className="download-button"
+                      size="small"
+                      onClick={(e) => handleDownloadImageFromLibrary(imageUrl, e)}
+                      sx={{
+                        position: 'absolute',
+                        top: 2,
+                        right: 2,
+                        bgcolor: 'background.paper',
+                        opacity: 0,
+                        transition: 'opacity 0.2s ease',
+                        p: 0.5,
+                        '&:hover': {
+                          bgcolor: 'primary.main',
+                          color: 'primary.contrastText',
+                        },
+                      }}
+                    >
+                      <Download sx={{ fontSize: '0.875rem' }} />
+                    </IconButton>
+                  </Box>
+                ))
+              )}
+            </Box>
           </Box>
-        </Box>
         </Collapse>
       </Box>
 
@@ -7363,29 +7654,29 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
         <Slide direction="up" in={!imageLibraryExpanded && generatedImages.length > 0} timeout={400}>
           <Box
             sx={{
-            borderTop: '1px solid',
-            borderColor: 'divider',
-            bgcolor: 'background.paper',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            px: 1.5,
-            py: 0.5,
-            cursor: 'pointer',
-            paddingBottom: { xs: 'max(0.5rem, env(safe-area-inset-bottom))', md: 0.5 },
-            '&:hover': {
-              bgcolor: 'action.hover',
-            },
-          }}
-          onClick={() => setImageLibraryExpanded(true)}
-        >
-          <Typography variant="body2" color="text.secondary" sx={{ fontSize: '0.8125rem' }}>
-            {generatedImages.length} generated image{generatedImages.length !== 1 ? 's' : ''}
-          </Typography>
-          <IconButton size="small" sx={{ p: 0.5 }}>
-            <ExpandLess fontSize="small" />
-          </IconButton>
-        </Box>
+              borderTop: '1px solid',
+              borderColor: 'divider',
+              bgcolor: 'background.paper',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              px: 1.5,
+              py: 0.5,
+              cursor: 'pointer',
+              paddingBottom: { xs: 'max(0.5rem, env(safe-area-inset-bottom))', md: 0.5 },
+              '&:hover': {
+                bgcolor: 'action.hover',
+              },
+            }}
+            onClick={() => setImageLibraryExpanded(true)}
+          >
+            <Typography variant="body2" color="text.secondary" sx={{ fontSize: '0.8125rem' }}>
+              {generatedImages.length} generated image{generatedImages.length !== 1 ? 's' : ''}
+            </Typography>
+            <IconButton size="small" sx={{ p: 0.5 }}>
+              <ExpandLess fontSize="small" />
+            </IconButton>
+          </Box>
         </Slide>
       </Box>
     </Box>
@@ -7400,11 +7691,11 @@ function StoneGrid({ selected, onOpen, label, icon, type }: { selected: string; 
     if (type === 'primary') {
       // Solitaire icon - single diamond
       return (
-        <Box sx={{ 
-          width: 20, 
-          height: 20, 
-          display: 'flex', 
-          alignItems: 'center', 
+        <Box sx={{
+          width: 20,
+          height: 20,
+          display: 'flex',
+          alignItems: 'center',
           justifyContent: 'center',
           position: 'relative'
         }}>
@@ -7433,11 +7724,11 @@ function StoneGrid({ selected, onOpen, label, icon, type }: { selected: string; 
     } else {
       // Small stones icon - multiple small diamonds
       return (
-        <Box sx={{ 
-          width: 20, 
-          height: 20, 
-          display: 'flex', 
-          alignItems: 'center', 
+        <Box sx={{
+          width: 20,
+          height: 20,
+          display: 'flex',
+          alignItems: 'center',
           justifyContent: 'center',
           gap: 0.5
         }}>
@@ -7469,13 +7760,13 @@ function StoneGrid({ selected, onOpen, label, icon, type }: { selected: string; 
 
   return (
     <Card variant="outlined" sx={{ borderRadius: 1, aspectRatio: '1', width: 60, height: 60 }}>
-      <CardActionArea 
-        onClick={onOpen} 
-        sx={{ 
-          display: 'flex', 
+      <CardActionArea
+        onClick={onOpen}
+        sx={{
+          display: 'flex',
           flexDirection: 'column',
-          justifyContent: 'center', 
-          alignItems: 'center', 
+          justifyContent: 'center',
+          alignItems: 'center',
           p: 0.5,
           height: '100%',
           minHeight: 60
@@ -7493,13 +7784,13 @@ function StoneGrid({ selected, onOpen, label, icon, type }: { selected: string; 
 function MetalGrid({ selected, onOpen, label }: { selected: string; onOpen: (e: any) => void; label: string }) {
   return (
     <Card variant="outlined" sx={{ borderRadius: 1, aspectRatio: '1', width: 60, height: 60 }}>
-      <CardActionArea 
-        onClick={onOpen} 
-        sx={{ 
-          display: 'flex', 
+      <CardActionArea
+        onClick={onOpen}
+        sx={{
+          display: 'flex',
           flexDirection: 'column',
-          justifyContent: 'center', 
-          alignItems: 'center', 
+          justifyContent: 'center',
+          alignItems: 'center',
           p: 0.5,
           height: '100%',
           minHeight: 60

@@ -1,13 +1,13 @@
-import { 
-  collection, 
-  doc, 
-  getDoc, 
-  setDoc, 
-  updateDoc, 
-  deleteDoc, 
-  query, 
-  where, 
-  getDocs, 
+import {
+  collection,
+  doc,
+  getDoc,
+  setDoc,
+  updateDoc,
+  deleteDoc,
+  query,
+  where,
+  getDocs,
   addDoc,
   serverTimestamp,
   Timestamp,
@@ -66,7 +66,7 @@ export const userProfileDoc = (userId: string) =>
   doc(db, 'users', userId)
 
 // Projects collection helpers
-export const projectsCollection = (userId: string) => 
+export const projectsCollection = (userId: string) =>
   collection(db, 'users', userId, 'projects')
 
 export const projectDoc = (userId: string, projectId: string) =>
@@ -87,21 +87,21 @@ export const motifDoc = (userId: string, motifId: string) =>
 // Get user profile - reads from user document directly
 export async function getUserProfile(userId: string): Promise<UserProfile | null> {
   if (!userId) return null
-  
+
   try {
     const profileRef = userProfileDoc(userId)
     const profileSnap = await getDoc(profileRef)
-    
+
     if (!profileSnap.exists()) {
       // User document doesn't exist yet - will be created on first login
       console.log('User document not found, will create on demand')
       return null
     }
-    
+
     const data = profileSnap.data()
     // Ensure tier exists, default to 'free' if missing
     const tier = (data.tier || 'free') as TierType
-    
+
     return {
       uid: userId,
       email: data.email || '',
@@ -124,11 +124,11 @@ export async function getUserProfile(userId: string): Promise<UserProfile | null
 
 // Create user profile - writes to user document directly
 export async function createUserProfile(
-  userId: string, 
+  userId: string,
   data: { tier: TierType; email?: string; displayName?: string }
 ): Promise<UserProfile> {
   if (!userId) throw new Error('User ID is required')
-  
+
   try {
     const profileRef = userProfileDoc(userId)
     const newProfile = {
@@ -139,11 +139,11 @@ export async function createUserProfile(
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     }
-    
+
     // Use merge: true to preserve existing fields (like photoURL, etc.)
     await setDoc(profileRef, newProfile, { merge: true })
     console.log('User profile created/updated:', userId, 'tier:', data.tier)
-    
+
     return {
       ...newProfile,
       createdAt: new Date(),
@@ -158,7 +158,7 @@ export async function createUserProfile(
 // Update user tier
 export async function updateUserTier(userId: string, tier: TierType): Promise<void> {
   if (!userId) throw new Error('User ID is required')
-  
+
   try {
     const profileRef = userProfileDoc(userId)
     await updateDoc(profileRef, {
@@ -174,13 +174,13 @@ export async function updateUserTier(userId: string, tier: TierType): Promise<vo
 
 // Update subscription info (when user purchases)
 export async function updateUserSubscription(
-  userId: string, 
+  userId: string,
   tier: TierType,
   subscriptionId: string,
   subscriptionStatus: 'active' | 'cancelled' | 'past_due' | 'trialing'
 ): Promise<void> {
   if (!userId) throw new Error('User ID is required')
-  
+
   try {
     const profileRef = userProfileDoc(userId)
     await updateDoc(profileRef, {
@@ -201,17 +201,17 @@ export async function updateUserSubscription(
 // Get all projects for a user
 export async function getUserProjects(userId: string): Promise<Project[]> {
   if (!userId) return []
-  
+
   try {
     console.log('Fetching projects for user:', userId)
     const startTime = Date.now()
-    
+
     const q = query(projectsCollection(userId))
     const querySnapshot = await getDocs(q)
-    
+
     const duration = Date.now() - startTime
     console.log(`Projects fetched in ${duration}ms, count: ${querySnapshot.docs.length}`)
-    
+
     return querySnapshot.docs.map(doc => ({
       id: doc.id,
       ...doc.data(),
@@ -225,19 +225,19 @@ export async function getUserProjects(userId: string): Promise<Project[]> {
       message: error?.message,
       name: error?.name
     })
-    
+
     // Only return empty array for truly offline scenarios
     // Don't silently fail for permission errors
     if (error?.code === 'unavailable') {
       console.warn('Firestore is unavailable, returning empty array')
       return []
     }
-    
+
     // Re-throw permission errors so UI can handle them
     if (error?.code === 'permission-denied') {
       throw new Error('Permission denied: Check Firestore Security Rules')
     }
-    
+
     return []
   }
 }
@@ -245,13 +245,13 @@ export async function getUserProjects(userId: string): Promise<Project[]> {
 // Get a single project
 export async function getProject(userId: string, projectId: string): Promise<Project | null> {
   if (!userId || !projectId) return null
-  
+
   try {
     const projectRef = projectDoc(userId, projectId)
     const projectSnap = await getDoc(projectRef)
-    
+
     if (!projectSnap.exists()) return null
-    
+
     const data = projectSnap.data()
     return {
       id: projectSnap.id,
@@ -272,11 +272,11 @@ export async function getProject(userId: string, projectId: string): Promise<Pro
 
 // Create a new project
 export async function createProject(
-  userId: string, 
+  userId: string,
   projectData: Omit<Project, 'id' | 'userId' | 'createdAt' | 'updatedAt'>
 ): Promise<string> {
   if (!userId) throw new Error('User ID is required')
-  
+
   try {
     console.log('Creating project for user:', userId, projectData)
     const newProject = {
@@ -285,7 +285,7 @@ export async function createProject(
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     }
-    
+
     const docRef = await addDoc(projectsCollection(userId), newProject)
     console.log('Project created successfully, ID:', docRef.id)
     return docRef.id
@@ -296,11 +296,11 @@ export async function createProject(
       message: error?.message,
       name: error?.name
     })
-    
+
     if (error?.code === 'permission-denied') {
       throw new Error('Permission denied: Check Firestore Security Rules')
     }
-    
+
     throw error
   }
 }
@@ -312,7 +312,7 @@ export async function updateProject(
   updates: Partial<Omit<Project, 'id' | 'userId' | 'createdAt'>>
 ): Promise<void> {
   if (!userId || !projectId) throw new Error('User ID and Project ID are required')
-  
+
   try {
     const projectRef = projectDoc(userId, projectId)
     await updateDoc(projectRef, {
@@ -330,18 +330,18 @@ export async function deleteProject(userId: string, projectId: string): Promise<
   if (!userId || !projectId) {
     throw new Error('User ID and Project ID are required')
   }
-  
+
   console.log('Deleting project:', { userId, projectId })
-  
+
   try {
     const projectRef = projectDoc(userId, projectId)
-    
+
     // Verify project exists before deleting
     const projectSnap = await getDoc(projectRef)
     if (!projectSnap.exists()) {
       throw new Error('Project not found')
     }
-    
+
     // Try to delete canvas data first (non-blocking)
     const canvasRef = canvasDoc(userId, projectId)
     try {
@@ -355,7 +355,7 @@ export async function deleteProject(userId: string, projectId: string): Promise<
       console.warn('Error deleting canvas data (continuing with project deletion):', canvasError)
       // Continue with project deletion even if canvas deletion fails
     }
-    
+
     // Delete the project document
     console.log('Deleting project document...')
     await deleteDoc(projectRef)
@@ -364,7 +364,7 @@ export async function deleteProject(userId: string, projectId: string): Promise<
     console.error('Error deleting project:', error)
     console.error('Error code:', error?.code)
     console.error('Error message:', error?.message)
-    
+
     // Handle offline errors gracefully
     if (error?.code === 'unavailable' || error?.message?.includes('offline')) {
       console.warn('Firestore is offline, deletion will sync when online')
@@ -378,7 +378,7 @@ export async function deleteProject(userId: string, projectId: string): Promise<
         throw new Error('Failed to delete project. Please try again when online.')
       }
     }
-    
+
     // Re-throw with a user-friendly message
     const errorMessage = error?.message || error?.code || 'Failed to delete project. Please try again.'
     throw new Error(errorMessage)
@@ -388,13 +388,13 @@ export async function deleteProject(userId: string, projectId: string): Promise<
 // Canvas data helpers
 export async function getCanvasData(userId: string, projectId: string): Promise<CanvasData | null> {
   if (!userId || !projectId) return null
-  
+
   try {
     const canvasRef = canvasDoc(userId, projectId)
     const canvasSnap = await getDoc(canvasRef)
-    
+
     if (!canvasSnap.exists()) return null
-    
+
     const data = canvasSnap.data()
     return {
       ...data,
@@ -407,19 +407,19 @@ export async function getCanvasData(userId: string, projectId: string): Promise<
       message: error?.message,
       name: error?.name
     })
-    
+
     // Only return null for truly unavailable scenarios
     if (error?.code === 'unavailable') {
       console.warn('Firestore is unavailable, returning null for canvas data')
       return null
     }
-    
+
     // Don't silently fail for permission errors
     if (error?.code === 'permission-denied') {
       console.error('Permission denied accessing canvas data')
       return null
     }
-    
+
     return null
   }
 }
@@ -433,7 +433,7 @@ export async function saveCanvasData(
   if (!userId || !projectId) {
     throw new Error('User ID and Project ID are required')
   }
-  
+
   try {
     const canvasRef = canvasDoc(userId, projectId)
     console.log('Saving canvas data to Firestore:', {
@@ -443,12 +443,12 @@ export async function saveCanvasData(
       linesCount: canvasData.lines?.length || 0,
       imagesCount: canvasData.images?.length || 0
     })
-    
+
     await setDoc(canvasRef, {
       ...canvasData,
       updatedAt: serverTimestamp(),
     }, { merge: true })
-    
+
     console.log('Canvas data saved successfully')
   } catch (error: any) {
     console.error('Error saving canvas data:', error)
@@ -457,7 +457,7 @@ export async function saveCanvasData(
       message: error?.message,
       stack: error?.stack
     })
-    
+
     // Handle offline/unavailable errors - still try to save (will queue)
     if (error?.code === 'unavailable') {
       console.warn('Firestore is unavailable, queuing save for when online')
@@ -476,13 +476,13 @@ export async function saveCanvasData(
         return
       }
     }
-    
+
     // Handle permission errors
     if (error?.code === 'permission-denied') {
       console.error('Permission denied saving canvas data - check Firestore Security Rules')
       throw new Error('Permission denied: Check Firestore Security Rules')
     }
-    
+
     throw error
   }
 }
@@ -492,11 +492,11 @@ export async function saveCanvasData(
 // Get all motifs for a user
 export async function getUserMotifs(userId: string): Promise<Motif[]> {
   if (!userId) return []
-  
+
   try {
     const motifsRef = motifsCollection(userId)
     const motifsSnap = await getDocs(motifsRef)
-    
+
     const motifs: Motif[] = []
     motifsSnap.forEach((doc) => {
       const data = doc.data()
@@ -508,14 +508,14 @@ export async function getUserMotifs(userId: string): Promise<Motif[]> {
         updatedAt: data.updatedAt?.toDate() || new Date(),
       })
     })
-    
+
     // Sort by creation date (newest first)
     motifs.sort((a, b) => {
       const aDate = a.createdAt instanceof Date ? a.createdAt : (a.createdAt as Timestamp).toDate()
       const bDate = b.createdAt instanceof Date ? b.createdAt : (b.createdAt as Timestamp).toDate()
       return bDate.getTime() - aDate.getTime()
     })
-    
+
     console.log(`Loaded ${motifs.length} motifs for user ${userId}`)
     return motifs
   } catch (error: any) {
@@ -540,7 +540,7 @@ export async function saveUserMotif(
   if (!userId || !motif.id) {
     throw new Error('User ID and Motif ID are required')
   }
-  
+
   try {
     const motifRef = motifDoc(userId, motif.id)
     await setDoc(motifRef, {
@@ -549,7 +549,7 @@ export async function saveUserMotif(
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     }, { merge: true })
-    
+
     console.log('Motif saved successfully:', motif.id, motif.name)
   } catch (error: any) {
     console.error('Error saving motif:', error)
@@ -565,7 +565,7 @@ export async function deleteUserMotif(userId: string, motifId: string): Promise<
   if (!userId || !motifId) {
     throw new Error('User ID and Motif ID are required')
   }
-  
+
   try {
     const motifRef = motifDoc(userId, motifId)
     await deleteDoc(motifRef)
@@ -588,7 +588,7 @@ export async function updateUserMotif(
   if (!userId || !motifId) {
     throw new Error('User ID and Motif ID are required')
   }
-  
+
   try {
     const motifRef = motifDoc(userId, motifId)
     await updateDoc(motifRef, {
@@ -624,16 +624,16 @@ export async function uploadCanvasImage(
   if (!userId || !projectId || !imageId || !dataUrl) {
     throw new Error('All parameters are required for image upload')
   }
-  
+
   try {
     // Create a reference to the image location in Storage
     const imagePath = `users/${userId}/projects/${projectId}/images/${imageId}`
     const imageRef = ref(storage, imagePath)
-    
+
     // Upload the base64 data URL
     const snapshot = await uploadString(imageRef, dataUrl, 'data_url')
     console.log('Image uploaded to Storage:', imagePath)
-    
+
     // Get the download URL
     const downloadURL = await getDownloadURL(snapshot.ref)
     return downloadURL
@@ -692,7 +692,7 @@ export async function deleteCanvasImage(
   if (!userId || !projectId || !imageId) {
     throw new Error('All parameters are required for image deletion')
   }
-  
+
   try {
     const imagePath = `users/${userId}/projects/${projectId}/images/${imageId}`
     const imageRef = ref(storage, imagePath)
@@ -717,7 +717,7 @@ export async function testStorageAvailability(): Promise<{ enabled: boolean; err
   try {
     // Try to create a reference to a test path
     const testRef = ref(storage, 'test/availability-check')
-    
+
     // Try to list files in the root (this will fail if Storage is not enabled)
     // We use a try-catch around listAll since it might fail
     try {
@@ -737,9 +737,9 @@ export async function testStorageAvailability(): Promise<{ enabled: boolean; err
       return { enabled: true, error: listError?.message || 'Unknown error' }
     }
   } catch (error: any) {
-    return { 
-      enabled: false, 
-      error: error?.message || 'Failed to check Storage availability' 
+    return {
+      enabled: false,
+      error: error?.message || 'Failed to check Storage availability'
     }
   }
 }

@@ -1,18 +1,18 @@
 'use client'
 
-import { 
-  Box, 
-  Button, 
-  Card, 
-  CardContent, 
-  Container, 
-  Skeleton, 
-  Typography, 
-  IconButton, 
-  Dialog, 
-  DialogTitle, 
-  DialogContent, 
-  DialogActions, 
+import {
+  Box,
+  Button,
+  Card,
+  CardContent,
+  Container,
+  Skeleton,
+  Typography,
+  IconButton,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
   TextField,
   Tooltip
 } from '@mui/material'
@@ -30,12 +30,12 @@ const isMobileDevice = (): boolean => {
   const isMobileViewport = window.innerWidth < 768
   return (isMobile && !isTablet) || isMobileViewport
 }
-import { 
-  getUserProjects, 
-  createProject, 
-  updateProject, 
+import {
+  getUserProjects,
+  createProject,
+  updateProject,
   deleteProject as deleteProjectFromFirestore,
-  type Project 
+  type Project
 } from '@/lib/firestore'
 
 export default function ProjectsPageClient() {
@@ -60,7 +60,7 @@ export default function ProjectsPageClient() {
         return match ? parseInt(match[1]) : 0
       })
       .filter(n => n > 0)
-    
+
     return projectNumbers.length > 0 ? Math.max(...projectNumbers) + 1 : 1
   }
 
@@ -90,32 +90,32 @@ export default function ProjectsPageClient() {
       setError('User not authenticated')
       return
     }
-    
+
     setCreatingProject(true)
     setError(null) // Clear previous errors
-    
+
     try {
       console.log('Fetching existing projects...')
       // Fetch fresh projects from Firestore to get accurate count
       const existingProjects = await getUserProjects(user.uid)
       console.log('Existing projects fetched:', existingProjects.length)
-      
+
       const nextNumber = getNextProjectNumber(existingProjects)
       console.log('Next project number:', nextNumber)
-      
+
       const projectData = {
         name: `Project ${nextNumber}`,
         description: 'New project',
       }
-      
+
       console.log('Calling createProject with:', projectData)
       const projectId = await createProject(user.uid, projectData)
       console.log('Project created, ID:', projectId)
-      
+
       // Reload projects to get the new one
       console.log('Reloading projects...')
       await loadProjects(user.uid)
-      
+
       // Navigate to the new project
       console.log('Navigating to canvas...')
       // Redirect mobile users to mcanvas, desktop users to canvas
@@ -136,10 +136,10 @@ export default function ProjectsPageClient() {
   // Cleanup duplicate projects (one-time function)
   const cleanupDuplicateProjects = async () => {
     if (!user?.uid) return
-    
+
     try {
       const allProjects = await getUserProjects(user.uid)
-      
+
       // Find projects with duplicate names
       const nameGroups = allProjects.reduce((acc, project) => {
         const name = project.name.trim()
@@ -149,7 +149,7 @@ export default function ProjectsPageClient() {
         acc[name].push(project)
         return acc
       }, {} as Record<string, Project[]>)
-      
+
       // Delete duplicates (keep the first one, delete the rest)
       const duplicatesToDelete: string[] = []
       for (const [, projectsWithName] of Object.entries(nameGroups)) {
@@ -160,23 +160,23 @@ export default function ProjectsPageClient() {
             const dateB = b.createdAt instanceof Date ? b.createdAt.getTime() : b.createdAt.toDate().getTime()
             return dateA - dateB
           })
-          
+
           // Keep the first one, mark the rest for deletion
           for (let i = 1; i < sorted.length; i++) {
             duplicatesToDelete.push(sorted[i].id)
           }
         }
       }
-      
+
       // Delete all duplicates
       for (const projectId of duplicatesToDelete) {
         await deleteProjectFromFirestore(user.uid, projectId)
         console.log(`Deleted duplicate project: ${projectId}`)
       }
-      
+
       // Reload projects
       await loadProjects(user.uid)
-      
+
       if (duplicatesToDelete.length > 0) {
         console.log(`Cleaned up ${duplicatesToDelete.length} duplicate projects`)
         alert(`Cleaned up ${duplicatesToDelete.length} duplicate project(s)`)
@@ -192,12 +192,12 @@ export default function ProjectsPageClient() {
   // Rename project
   const handleRenameProject = async () => {
     if (!editingProject || !newName.trim() || !user?.uid) return
-    
+
     try {
       await updateProject(user.uid, editingProject.id, {
         name: newName.trim(),
       })
-      
+
       // Reload projects
       await loadProjects(user.uid)
       setEditingProject(null)
@@ -213,26 +213,26 @@ export default function ProjectsPageClient() {
       setError('Unable to delete: User not authenticated')
       return
     }
-    
+
     const projectIdToDelete = deleteProject.id
     setDeletingProjectId(projectIdToDelete)
     setError(null)
-    
+
     try {
       console.log('Attempting to delete project:', projectIdToDelete, 'for user:', user.uid)
-      
+
       // Add timeout to prevent hanging
       const deletePromise = deleteProjectFromFirestore(user.uid, projectIdToDelete)
-      const timeoutPromise = new Promise((_, reject) => 
+      const timeoutPromise = new Promise((_, reject) =>
         setTimeout(() => reject(new Error('Delete operation timed out after 10 seconds')), 10000)
       )
-      
+
       await Promise.race([deletePromise, timeoutPromise])
       console.log('Project deleted successfully, reloading projects...')
-      
+
       // Reload projects to reflect the deletion
       await loadProjects(user.uid)
-      
+
       // Close dialog and reset state
       setDeleteProject(null)
       setDeletingProjectId(null)
@@ -260,7 +260,7 @@ export default function ProjectsPageClient() {
   useEffect(() => {
     if (loading) return
     if (!user?.uid) return
-    
+
     // Load projects from Firestore
     loadProjects(user.uid)
   }, [loading, user])
@@ -296,17 +296,17 @@ export default function ProjectsPageClient() {
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
         <Typography variant="h4">My Projects</Typography>
         <Box sx={{ display: 'flex', gap: 2 }}>
-          <Button 
-            variant="outlined" 
+          <Button
+            variant="outlined"
             onClick={cleanupDuplicateProjects}
             disabled={loadingProjects || creatingProject}
             sx={{ color: '#666666', borderColor: '#666666' }}
           >
             Clean Duplicates
           </Button>
-          <Button 
-            variant="contained" 
-            onClick={createNewProject} 
+          <Button
+            variant="contained"
+            onClick={createNewProject}
             disabled={creatingProject || loadingProjects}
             sx={{
               bgcolor: '#000000',
@@ -328,58 +328,58 @@ export default function ProjectsPageClient() {
       ) : projects && projects.length > 0 ? (
         <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: '1fr 1fr', md: 'repeat(3, 1fr)' }, gap: 2 }}>
           {projects.map(p => (
-          <Card key={p.id} sx={{ position: 'relative' }}>
-            <CardContent>
-              <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', mb: 1 }}>
-                <Typography variant="h6" sx={{ flex: 1, pr: 1 }}>{p.name}</Typography>
-                <Box sx={{ display: 'flex', gap: 0.5 }}>
-                  <Tooltip title="Rename project">
-                    <IconButton 
-                      size="small" 
-                      onClick={() => startEditing(p)}
-                      sx={{ 
-                        color: 'text.secondary',
-                        '&:hover': { color: 'primary.main' }
-                      }}
-                    >
-                      <Edit sx={{ fontSize: '0.875rem' }} />
-                    </IconButton>
-                  </Tooltip>
-                  <Tooltip title="Delete project">
-                    <IconButton 
-                      size="small" 
-                      onClick={() => setDeleteProject(p)}
-                      sx={{ 
-                        color: 'text.secondary',
-                        '&:hover': { color: 'error.main' }
-                      }}
-                    >
-                      <Delete sx={{ fontSize: '0.875rem' }} />
-                    </IconButton>
-                  </Tooltip>
+            <Card key={p.id} sx={{ position: 'relative' }}>
+              <CardContent>
+                <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', mb: 1 }}>
+                  <Typography variant="h6" sx={{ flex: 1, pr: 1 }}>{p.name}</Typography>
+                  <Box sx={{ display: 'flex', gap: 0.5 }}>
+                    <Tooltip title="Rename project">
+                      <IconButton
+                        size="small"
+                        onClick={() => startEditing(p)}
+                        sx={{
+                          color: 'text.secondary',
+                          '&:hover': { color: 'primary.main' }
+                        }}
+                      >
+                        <Edit sx={{ fontSize: '0.875rem' }} />
+                      </IconButton>
+                    </Tooltip>
+                    <Tooltip title="Delete project">
+                      <IconButton
+                        size="small"
+                        onClick={() => setDeleteProject(p)}
+                        sx={{
+                          color: 'text.secondary',
+                          '&:hover': { color: 'error.main' }
+                        }}
+                      >
+                        <Delete sx={{ fontSize: '0.875rem' }} />
+                      </IconButton>
+                    </Tooltip>
+                  </Box>
                 </Box>
-              </Box>
-              <Typography color="text.secondary" sx={{ mb: 2 }}>{p.description || 'No description'}</Typography>
-              <Button 
-                fullWidth
-                sx={{ 
-                  bgcolor: '#000000', 
-                  color: '#ffffff', 
-                  '&:hover': { bgcolor: '#333333' } 
-                }} 
-                onClick={() => {
-                  // Redirect mobile users to mcanvas, desktop users to canvas
-                  if (isMobileDevice()) {
-                    router.push(`/mcanvas?projectId=${p.id}`)
-                  } else {
-                    router.push(`/canvas/${p.id}`)
-                  }
-                }}
-              >
-                Open
-              </Button>
-            </CardContent>
-          </Card>
+                <Typography color="text.secondary" sx={{ mb: 2 }}>{p.description || 'No description'}</Typography>
+                <Button
+                  fullWidth
+                  sx={{
+                    bgcolor: '#000000',
+                    color: '#ffffff',
+                    '&:hover': { bgcolor: '#333333' }
+                  }}
+                  onClick={() => {
+                    // Redirect mobile users to mcanvas, desktop users to canvas
+                    if (isMobileDevice()) {
+                      router.push(`/mcanvas?projectId=${p.id}`)
+                    } else {
+                      router.push(`/canvas/${p.id}`)
+                    }
+                  }}
+                >
+                  Open
+                </Button>
+              </CardContent>
+            </Card>
           ))}
         </Box>
       ) : (
@@ -421,8 +421,8 @@ export default function ProjectsPageClient() {
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setEditingProject(null)}>Cancel</Button>
-          <Button 
-            onClick={handleRenameProject} 
+          <Button
+            onClick={handleRenameProject}
             variant="contained"
             disabled={!newName.trim()}
             sx={{ bgcolor: '#000000', color: '#ffffff', '&:hover': { bgcolor: '#333333' } }}
@@ -446,17 +446,17 @@ export default function ProjectsPageClient() {
           )}
         </DialogContent>
         <DialogActions>
-          <Button 
+          <Button
             onClick={() => {
               setDeleteProject(null)
               setError(null)
-            }} 
+            }}
             disabled={!!deletingProjectId}
           >
             Cancel
           </Button>
-          <Button 
-            onClick={handleDeleteProject} 
+          <Button
+            onClick={handleDeleteProject}
             variant="contained"
             color="error"
             disabled={!!deletingProjectId}
