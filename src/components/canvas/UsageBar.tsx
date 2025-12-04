@@ -6,7 +6,7 @@ import { UsageStatus } from '@/lib/usageTracker'
 import { useState, useEffect } from 'react'
 
 // Version number - will be updated by GitHub Actions on deployment
-const APP_VERSION = 'v1.13'
+const APP_VERSION = 'v1.15'
 
 interface UsageBarProps {
   usageStatus: UsageStatus
@@ -35,12 +35,12 @@ export default function UsageBar({ usageStatus, onUsageClick }: UsageBarProps) {
 
       // Calculate the actual time when it will be available
       const availableDate = new Date(cooldownUntil * 1000)
-      const timeString = availableDate.toLocaleTimeString('en-US', { 
-        hour: '2-digit', 
+      const timeString = availableDate.toLocaleTimeString('en-US', {
+        hour: '2-digit',
         minute: '2-digit',
-        hour12: true 
+        hour12: true
       })
-      
+
       setAvailableTime(`Available at ${timeString}`)
     }
 
@@ -49,19 +49,19 @@ export default function UsageBar({ usageStatus, onUsageClick }: UsageBarProps) {
 
     return () => clearInterval(interval)
   }, [cooldownUntil])
-  
+
   // Find the most constrained window (for display)
-  const displayWindow = windowUsages.length > 0 
-    ? windowUsages.reduce((most, current) => 
-        current.percentage > most.percentage ? current : most
-      )
+  const displayWindow = windowUsages.length > 0
+    ? windowUsages.reduce((most, current) =>
+      current.percentage > most.percentage ? current : most
+    )
     : null
-  
+
   // Calculate progress percentage based on the most constrained window
-  const progressPercentage = displayWindow 
+  const progressPercentage = displayWindow
     ? Math.min((displayWindow.used / (displayWindow.window.quota + overdraft)) * 100, 100)
     : 0
-  
+
   // Color mapping - force red during cooldown
   const getProgressColor = () => {
     if (cooldownUntil) {
@@ -74,7 +74,7 @@ export default function UsageBar({ usageStatus, onUsageClick }: UsageBarProps) {
       default: return '#4caf50'
     }
   }
-  
+
   // Background color for the bar container - force red during cooldown
   const getBarBackgroundColor = () => {
     if (cooldownUntil) {
@@ -87,7 +87,7 @@ export default function UsageBar({ usageStatus, onUsageClick }: UsageBarProps) {
       default: return 'rgba(76, 175, 80, 0.1)'
     }
   }
-  
+
   const getStatusText = () => {
     if (cooldownUntil) {
       return availableTime || 'Limit Reached'
@@ -95,7 +95,7 @@ export default function UsageBar({ usageStatus, onUsageClick }: UsageBarProps) {
     switch (color) {
       case 'green': return 'Good'
       case 'yellow': return 'Warning'
-      case 'red': 
+      case 'red':
         if (availableTime) {
           return availableTime
         }
@@ -103,19 +103,19 @@ export default function UsageBar({ usageStatus, onUsageClick }: UsageBarProps) {
       default: return 'Good'
     }
   }
-  
+
   // Tooltip with detailed usage info
   const getTooltipContent = () => {
     if (!displayWindow) return ''
-    
+
     if (windowUsages.length === 1) {
       // Single window - show detailed info
       const { used, window } = displayWindow
       return `${used}/${window.quota} images used (${window.label})`
     }
-    
+
     // Multiple windows - show all constraints
-    return windowUsages.map(w => 
+    return windowUsages.map(w =>
       `${w.window.label}: ${w.used}/${w.window.quota} (${Math.round(w.percentage)}%)`
     ).join('\n')
   }
@@ -170,8 +170,8 @@ export default function UsageBar({ usageStatus, onUsageClick }: UsageBarProps) {
             </Box>
           </Tooltip>
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
-            <Typography variant="caption" sx={{ 
-              fontWeight: 600, 
+            <Typography variant="caption" sx={{
+              fontWeight: 600,
               color: availableTime ? '#ff6b6b' : getProgressColor(),
               textTransform: 'uppercase',
               fontSize: '0.65rem',
@@ -186,7 +186,7 @@ export default function UsageBar({ usageStatus, onUsageClick }: UsageBarProps) {
             </Typography>
           </Box>
         </Box>
-        
+
         <Box sx={{ position: 'relative' }}>
           <LinearProgress
             variant="determinate"
@@ -212,7 +212,7 @@ export default function UsageBar({ usageStatus, onUsageClick }: UsageBarProps) {
 export function VersionDisplay() {
   const theme = useTheme()
   const isDark = theme.palette.mode === 'dark'
-  
+
   return (
     <Typography
       variant="caption"

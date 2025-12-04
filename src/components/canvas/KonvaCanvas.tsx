@@ -496,54 +496,58 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
     const metalLabel = METALS.find(m => m.key === metal)?.label ?? metal
     const hasSignatureStyles = signatureStyles.some(style => !!style.storageUrl)
 
+    // Convert canvasInfluence percentage to actionable instruction
+    const fidelityInstruction = canvasInfluence > 70
+      ? 'Follow the sketch design precisely - proportions, angles, and details must match exactly.'
+      : canvasInfluence > 40
+        ? 'Use sketch as primary reference but allow minor refinements for realism.'
+        : 'Treat sketch as loose inspiration - interpret the general concept freely.'
+
     if (action === 'generate') {
-      const generateParts = [
-        'Create a photorealistic jewellery render derived from the following sketch with the following details in mind:',
+      const parts = [
+        'Jewelry product render. Studio softbox lighting. White background.',
         '',
-        `Ensure that the design accuracy of the render is at least of ${canvasInfluence}%.`,
-        `The jewellery render should have a Primary stone: ${primaryStoneInfo.label}.`,
-        secondaryStoneInfo ? `Secondary stone: ${secondaryStoneInfo.label}.` : null,
-        `The jewellery render should have the metal color as: ${metalLabel}.`,
-        selectedJewelleryStyle
-          ? `Very importantly the following is the Design style which we need to understand and inculcate in the jewellery render based on the sketch drawn by the user: ${selectedJewelleryStyle}.`
-          : null,
-        hasSignatureStyles
-          ? 'The user has provided up to 4 signature style reference images. Please strongly follow these styles when designing the jewellery from the sketch.'
-          : null,
-        `Campaign style: ${selectedStyle}.`,
-        `Target region: ${selectedRegion}.`,
-        contextText.trim()
-          ? `This is the design Context which the user has uploaded and the user would like us to pick and be inspired by this when you make the render of their jewellery sketch: ${contextText.trim()}.`
-          : null,
-        contentDetails.trim()
-          ? `Additional custom notes given by the user to keep in mind before you make the render: ${contentDetails.trim()}.`
-          : null,
-        'Deliver a high-resolution jewellery render accordingly and ensure that the background is white with subtle shadows.'
+        'CRITICAL: Match the exact angle and view shown in the input sketch.',
+        fidelityInstruction,
+        '',
+        'Design specifications:',
+        `- Metal: ${metalLabel} (polished finish, realistic reflections)`,
+        `- Primary stone: ${primaryStoneInfo.label} (show brilliance and fire)`,
+        secondaryStoneInfo ? `- Secondary stones: ${secondaryStoneInfo.label}` : null,
+        selectedJewelleryStyle ? `- Design style: ${selectedJewelleryStyle}` : null,
+        '',
+        hasSignatureStyles ? 'Reference the provided style images for design language and aesthetic.' : null,
+        selectedStyle !== 'Modern' ? `- Campaign aesthetic: ${selectedStyle}` : null,
+        selectedRegion !== 'Global' ? `- Target market: ${selectedRegion}` : null,
+        contextText.trim() ? `- Design context: ${contextText.trim()}` : null,
+        contentDetails.trim() ? `- Additional notes: ${contentDetails.trim()}` : null,
+        '',
+        'Output: Single jewelry piece, centered, catalog-quality, ready for client presentation.'
       ]
 
-      return generateParts.filter(Boolean).join('\n')
+      return parts.filter(Boolean).join('\n')
     }
 
-    // Harmonize prompt with dynamic options
-    const harmonizeOptionsText = selectedHarmonizeOptions.length
+    // Harmonize = Create matching collection pieces
+    const collectionPieces = selectedHarmonizeOptions.length > 0
       ? selectedHarmonizeOptions.join(', ')
-      : ''
-    const intro = harmonizeOptionsText
-      ? `Based on this sketch or render of a jewellery piece please maintain the same style and create the following also ${selectedHarmonizeOptions.join(', ')} as a collection on a white background with subtle shadows like a studio photography of the pieces.`
-      : 'Based on this sketch or render of a jewellery piece please maintain the same style and create a harmonized collection on a white background with subtle shadows like a studio photography of the pieces.'
+      : 'matching earrings, bracelet, and pendant'
 
     const parts = [
-      intro,
-      `Follow the sketch with an influence of ${canvasInfluence}%.`,
-      `Primary stone: ${primaryStoneInfo.label}.`,
-      secondaryStoneInfo ? `Secondary stone: ${secondaryStoneInfo.label}.` : null,
-      `Metal preference: ${metalLabel}.`,
-      selectedJewelleryStyle ? `Design inspiration: ${selectedJewelleryStyle}.` : null,
-      `Campaign style: ${selectedStyle}.`,
-      `Target region: ${selectedRegion}.`,
-      contextText.trim() ? `Context: ${contextText.trim()}.` : null,
-      contentDetails.trim() ? `Additional notes: ${contentDetails.trim()}.` : null,
-      'Deliver a high-resolution image suitable for presentation and client review.'
+      'Create matching jewelry pieces based on the hero design shown.',
+      '',
+      `Generate: ${collectionPieces}`,
+      '',
+      'Requirements:',
+      '- Maintain identical: metal finish, stone type, design motifs, craftsmanship level',
+      '- Each piece scaled appropriately for its jewelry type',
+      `- Metal: ${metalLabel} (same finish as hero piece)`,
+      `- Stones: ${primaryStoneInfo.label}${secondaryStoneInfo ? ` with ${secondaryStoneInfo.label}` : ''}`,
+      selectedJewelleryStyle ? `- Follow ${selectedJewelleryStyle} design language` : null,
+      contextText.trim() ? `- Context: ${contextText.trim()}` : null,
+      contentDetails.trim() ? `- Notes: ${contentDetails.trim()}` : null,
+      '',
+      'Output: All pieces arranged together as a collection, studio softbox lighting, white background, catalog presentation style.'
     ]
 
     return parts.filter(Boolean).join('\n')
@@ -7482,29 +7486,29 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
         onClose={() => setShowClearAllDialog(false)}
         aria-labelledby="clear-all-dialog-title"
         aria-describedby="clear-all-dialog-description"
-        maxWidth="xs"
-        fullWidth
         PaperProps={{
           sx: {
-            margin: { xs: 'env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)', md: '32px' },
-            maxWidth: { xs: 'calc(100% - env(safe-area-inset-left) - env(safe-area-inset-right))', md: 'xs' }
+            minWidth: 200,
+            maxWidth: 280,
+            borderRadius: 2,
+            m: 2
           }
         }}
       >
-        <DialogTitle id="clear-all-dialog-title" sx={{ pb: 1 }}>
+        <DialogTitle id="clear-all-dialog-title" sx={{ py: 1.5, px: 2, fontSize: '1rem' }}>
           Clear All?
         </DialogTitle>
-        <DialogContent sx={{ pt: 1 }}>
-          <DialogContentText id="clear-all-dialog-description">
-            Are you sure you want to clear all sketches on the canvas?
+        <DialogContent sx={{ py: 1, px: 2 }}>
+          <DialogContentText id="clear-all-dialog-description" sx={{ fontSize: '0.875rem' }}>
+            Clear all sketches?
           </DialogContentText>
         </DialogContent>
-        <DialogActions sx={{ px: 3, pb: 2 }}>
-          <Button onClick={() => setShowClearAllDialog(false)} color="primary">
+        <DialogActions sx={{ px: 2, pb: 1.5, pt: 0.5 }}>
+          <Button size="small" onClick={() => setShowClearAllDialog(false)} color="primary">
             Cancel
           </Button>
-          <Button onClick={clearAll} color="error" variant="contained" autoFocus>
-            Clear All
+          <Button size="small" onClick={clearAll} color="error" variant="contained" autoFocus>
+            Clear
           </Button>
         </DialogActions>
       </Dialog>
