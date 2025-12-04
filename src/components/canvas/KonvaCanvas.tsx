@@ -2077,10 +2077,12 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
 
   // Set up gesture handler callbacks for undo/redo
   useEffect(() => {
-    gestureHandlerRef.current.setCallbacks({
-      onUndo: undo,
-      onRedo: redo
-    })
+    if (gestureHandlerRef.current) {
+      gestureHandlerRef.current.setCallbacks({
+        onUndo: undo,
+        onRedo: redo
+      })
+    }
   }, [undo, redo])
 
   // Native touch event handler for gesture detection
@@ -2094,6 +2096,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
     if (!canvasElement) return
 
     const handleTouchStartNative = (e: TouchEvent) => {
+      if (!gestureHandlerRef.current) return
       const gestureType = gestureHandlerRef.current.handleTouchStart(e)
 
       // Block default if multi-touch
@@ -2103,11 +2106,12 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
     }
 
     const handleTouchMoveNative = (e: TouchEvent) => {
+      if (!gestureHandlerRef.current) return
       const result = gestureHandlerRef.current.handleTouchMove(e)
 
       if (result.blockDrawing) {
         // Cancel any active drawing
-        drawingEngineRef.current.cancelStroke()
+        drawingEngineRef.current?.cancelStroke()
         setActiveStroke(null)
         isDrawing.current = false
         e.preventDefault()
@@ -2115,6 +2119,7 @@ export default function KonvaCanvas({ projectId }: KonvaCanvasProps) {
     }
 
     const handleTouchEndNative = (e: TouchEvent) => {
+      if (!gestureHandlerRef.current) return
       const gestureType = gestureHandlerRef.current.handleTouchEnd(e)
 
       // Log gesture for debugging
